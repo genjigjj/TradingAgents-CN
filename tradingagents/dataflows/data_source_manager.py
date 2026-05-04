@@ -1067,7 +1067,6 @@ class DataSourceManager:
             if self.current_source == ChinaDataSource.MONGODB:
                 result, actual_source = self._get_mongodb_data(symbol, start_date, end_date, period)
             elif self.current_source == ChinaDataSource.TUSHARE:
-                logger.info(f"🔍 [股票代码追踪] 调用 Tushare 数据源，传入参数: symbol='{symbol}', period='{period}'")
                 result = self._get_tushare_data(symbol, start_date, end_date, period)
                 actual_source = "tushare"
             elif self.current_source == ChinaDataSource.AKSHARE:
@@ -1081,10 +1080,14 @@ class DataSourceManager:
                 result = f"❌ 不支持的数据源: {self.current_source.value}"
                 actual_source = None
 
+            # 统一处理：如果 result 是 tuple（来自 _get_mongodb_data 或 _try_fallback_sources），解包为 str
+            if isinstance(result, tuple):
+                result, actual_source = result[0], result[1] if len(result) > 1 else actual_source
+
             # 记录详细的输出结果
             duration = time.time() - start_time
-            result_length = len(result) if result else 0
-            is_success = result and "❌" not in result and "错误" not in result
+            result_length = len(result) if isinstance(result, str) and result else 0
+            is_success = isinstance(result, str) and result and "❌" not in result and "错误" not in result
 
             # 使用实际数据源名称，如果没有则使用 current_source
             display_source = actual_source or self.current_source.value
@@ -1119,6 +1122,9 @@ class DataSourceManager:
 
                 # 数据质量异常时也尝试降级到其他数据源
                 fallback_result = self._try_fallback_sources(symbol, start_date, end_date)
+                # _try_fallback_sources 返回 tuple(str, str|None)，解包
+                if isinstance(fallback_result, tuple):
+                    fallback_result, _ = fallback_result
                 if fallback_result and "❌" not in fallback_result and "错误" not in fallback_result:
                     logger.info(f"✅ [数据来源: 备用数据源] 降级成功获取数据: {symbol}")
                     return fallback_result
@@ -1138,7 +1144,11 @@ class DataSourceManager:
                             'error': str(e),
                             'event_type': 'data_fetch_exception'
                         }, exc_info=True)
-            return self._try_fallback_sources(symbol, start_date, end_date)
+            fallback = self._try_fallback_sources(symbol, start_date, end_date)
+            # _try_fallback_sources 返回 tuple(str, str|None)，解包为 str
+            if isinstance(fallback, tuple):
+                fallback = fallback[0]
+            return fallback
 
     def _get_mongodb_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> tuple[str, str | None]:
         """
@@ -1285,23 +1295,27 @@ class DataSourceManager:
             # 使用异步方法获取历史数据
             import asyncio
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                loop = asyncio.get_running_loop()
+                # 已在运行的事件循环中（如 FastAPI），使用线程池执行同步调用
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    data = pool.submit(asyncio.run, provider.get_historical_data(symbol, start_date, end_date, period)).result()
             except RuntimeError:
-                # 在线程池中没有事件循环，创建新的
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+                # 没有运行中的事件循环，直接 asyncio.run
+                data = asyncio.run(provider.get_historical_data(symbol, start_date, end_date, period))
 
             duration = time.time() - start_time
 
             if data is not None and not data.empty:
                 # 🔧 修复：使用统一的格式化方法，包含技术指标计算
                 # 获取股票基本信息
-                stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        stock_info = pool.submit(asyncio.run, provider.get_stock_basic_info(symbol)).result()
+                except RuntimeError:
+                    stock_info = asyncio.run(provider.get_stock_basic_info(symbol))
                 stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
                 # 调用统一的格式化方法（包含技术指标计算）
@@ -1329,21 +1343,25 @@ class DataSourceManager:
         # 使用异步方法获取历史数据
         import asyncio
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            asyncio.get_running_loop()
+            # 已在运行的事件循环中（如 FastAPI），使用线程池执行同步调用
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                data = pool.submit(asyncio.run, provider.get_historical_data(symbol, start_date, end_date, period)).result()
         except RuntimeError:
-            # 在线程池中没有事件循环，创建新的
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        data = loop.run_until_complete(provider.get_historical_data(symbol, start_date, end_date, period))
+            # 没有运行中的事件循环，直接 asyncio.run
+            data = asyncio.run(provider.get_historical_data(symbol, start_date, end_date, period))
 
         if data is not None and not data.empty:
             # 🔧 修复：使用统一的格式化方法，包含技术指标计算
             # 获取股票基本信息
-            stock_info = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+            try:
+                asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    stock_info = pool.submit(asyncio.run, provider.get_stock_basic_info(symbol)).result()
+            except RuntimeError:
+                stock_info = asyncio.run(provider.get_stock_basic_info(symbol))
             stock_name = stock_info.get('name', f'股票{symbol}') if stock_info else f'股票{symbol}'
 
             # 调用统一的格式化方法（包含技术指标计算）
@@ -2162,8 +2180,11 @@ def get_china_stock_data_unified(symbol: str, start_date: str, end_date: str) ->
     manager = get_data_source_manager()
     logger.info(f"🔍 [股票代码追踪] 调用 manager.get_stock_data，传入参数: symbol='{symbol}', start_date='{start_date}', end_date='{end_date}'")
     result = manager.get_stock_data(symbol, start_date, end_date)
+    # 防御性处理：确保 result 是 str（某些代码路径可能返回 tuple）
+    if isinstance(result, tuple):
+        result = result[0]
     # 分析返回结果的详细信息
-    if result:
+    if result and isinstance(result, str):
         lines = result.split('\n')
         data_lines = [line for line in lines if '2025-' in line and symbol in line]
         logger.info(f"🔍 [股票代码追踪] 返回结果统计: 总行数={len(lines)}, 数据行数={len(data_lines)}, 结果长度={len(result)}字符")

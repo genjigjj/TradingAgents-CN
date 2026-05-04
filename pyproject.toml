@@ -78,6 +78,7 @@ dependencies = [
     "psutil>=6.1.0",
     "python-dotenv>=1.0.0",
     "pytz>=2025.2",
+    "pywencai>=0.11.0",  # 问财数据接口，用于主力选股数据获取
     "questionary>=2.1.0",
     "rich>=14.0.0",
     "setuptools>=80.9.0",
@@ -85,10 +86,14 @@ dependencies = [
     "toml>=0.10.2",
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
+
+    # 缓存工具
+    "cachetools>=5.3.0",
 ]
 
 [project.optional-dependencies]
 qianfan = ["qianfan>=0.4.20"]
+test = ["hypothesis>=6.100.0", "pytest>=8.0.0", "anyio>=4.0.0"]
 
 [project.scripts]
 tradingagents = "main:main"

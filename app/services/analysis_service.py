@@ -38,9 +38,56 @@ from app.services.config_provider import provider as config_provider
 from app.services.queue import DEFAULT_USER_CONCURRENT_LIMIT, GLOBAL_CONCURRENT_LIMIT, VISIBILITY_TIMEOUT_SECONDS
 from app.services.usage_statistics_service import UsageStatisticsService
 from app.models.config import UsageRecord
+from app.services.unified_llm_service import unified_llm_service
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _run_async_in_sync(coro):
+    """
+    在同步上下文中运行异步协程（用于线程池中调用 unified_llm_service 的 async 方法）。
+
+    如果当前线程没有事件循环，则创建新的事件循环运行协程。
+    如果当前已在事件循环中，则在新线程中运行以避免死锁。
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        # 已在事件循环中，创建新线程运行协程以避免死锁
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=30)
+    else:
+        # 没有运行中的事件循环，直接创建新的
+        return asyncio.run(coro)
+
+
+def _get_model_config_dict(merged_config):
+    """
+    从 MergedModelConfig 提取模型配置参数字典，用于传递给 create_analysis_config。
+
+    Args:
+        merged_config: MergedModelConfig 实例
+
+    Returns:
+        包含 max_tokens、temperature、timeout、retry_times、api_base 的字典
+    """
+    if merged_config is None:
+        return None
+    return {
+        "max_tokens": merged_config.max_tokens,
+        "temperature": merged_config.temperature,
+        "timeout": merged_config.timeout,
+        "retry_times": merged_config.retry_times,
+        "api_base": merged_config.api_base,
+    }
 
 
 class AnalysisService:
@@ -110,59 +157,31 @@ class AnalysisService:
             # 环境检查
             progress_tracker.update_progress("🔧 检查环境配置")
 
-            # 使用标准配置函数创建完整配置
+            # 通过 unified_llm_service 获取模型配置（Requirements: 4.5）
             from app.core.unified_config import unified_config
 
             quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
             deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
 
-            # 🔧 从 MongoDB 数据库读取模型的完整配置参数（而不是从 JSON 文件）
+            # 🔧 通过 unified_llm_service 获取模型的完整配置参数
             quick_model_config = None
             deep_model_config = None
 
             try:
-                from pymongo import MongoClient
-                from app.core.config import settings
+                quick_merged = _run_async_in_sync(unified_llm_service.get_model_config(quick_model))
+                quick_model_config = _get_model_config_dict(quick_merged)
+                if quick_model_config:
+                    logger.info(f"✅ 通过 unified_llm_service 读取快速模型配置: {quick_model}")
+                    logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
+                    logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
+                    logger.info(f"   api_base={quick_model_config['api_base']}")
 
-                # 使用同步 MongoDB 客户端
-                client = MongoClient(settings.MONGO_URI)
-                db = client[settings.MONGO_DB]
-                collection = db.system_configs
-
-                # 查询最新的活跃配置
-                doc = collection.find_one({"is_active": True}, sort=[("version", -1)])
-
-                if doc and "llm_configs" in doc:
-                    llm_configs = doc["llm_configs"]
-                    logger.info(f"✅ 从 MongoDB 读取到 {len(llm_configs)} 个模型配置")
-
-                    for llm_config in llm_configs:
-                        if llm_config.get("model_name") == quick_model:
-                            quick_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            logger.info(f"✅ 读取快速模型配置: {quick_model}")
-                            logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
-                            logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
-                            logger.info(f"   api_base={quick_model_config['api_base']}")
-
-                        if llm_config.get("model_name") == deep_model:
-                            deep_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            logger.info(f"✅ 读取深度模型配置: {deep_model} - {deep_model_config}")
-                else:
-                    logger.warning("⚠️ MongoDB 中没有找到系统配置，将使用默认参数")
+                deep_merged = _run_async_in_sync(unified_llm_service.get_model_config(deep_model))
+                deep_model_config = _get_model_config_dict(deep_merged)
+                if deep_model_config:
+                    logger.info(f"✅ 通过 unified_llm_service 读取深度模型配置: {deep_model} - {deep_model_config}")
             except Exception as e:
-                logger.warning(f"⚠️ 从 MongoDB 读取模型配置失败: {e}，将使用默认参数")
+                logger.warning(f"⚠️ 通过 unified_llm_service 读取模型配置失败: {e}，将使用默认参数")
 
             # 成本估算
             progress_tracker.update_progress("💰 预估分析成本")
@@ -240,59 +259,31 @@ class AnalysisService:
         try:
             logger.info(f"🔄 [线程池] 开始执行分析任务: {task.task_id} - {task.symbol}")
 
-            # 使用标准配置函数创建完整配置
+            # 通过 unified_llm_service 获取模型配置（Requirements: 4.5）
             from app.core.unified_config import unified_config
 
             quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
             deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
 
-            # 🔧 从 MongoDB 数据库读取模型的完整配置参数（而不是从 JSON 文件）
+            # 🔧 通过 unified_llm_service 获取模型的完整配置参数
             quick_model_config = None
             deep_model_config = None
 
             try:
-                from pymongo import MongoClient
-                from app.core.config import settings
+                quick_merged = _run_async_in_sync(unified_llm_service.get_model_config(quick_model))
+                quick_model_config = _get_model_config_dict(quick_merged)
+                if quick_model_config:
+                    logger.info(f"✅ 通过 unified_llm_service 读取快速模型配置: {quick_model}")
+                    logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
+                    logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
+                    logger.info(f"   api_base={quick_model_config['api_base']}")
 
-                # 使用同步 MongoDB 客户端
-                client = MongoClient(settings.MONGO_URI)
-                db = client[settings.MONGO_DB]
-                collection = db.system_configs
-
-                # 查询最新的活跃配置
-                doc = collection.find_one({"is_active": True}, sort=[("version", -1)])
-
-                if doc and "llm_configs" in doc:
-                    llm_configs = doc["llm_configs"]
-                    logger.info(f"✅ 从 MongoDB 读取到 {len(llm_configs)} 个模型配置")
-
-                    for llm_config in llm_configs:
-                        if llm_config.get("model_name") == quick_model:
-                            quick_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            logger.info(f"✅ 读取快速模型配置: {quick_model}")
-                            logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
-                            logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
-                            logger.info(f"   api_base={quick_model_config['api_base']}")
-
-                        if llm_config.get("model_name") == deep_model:
-                            deep_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            logger.info(f"✅ 读取深度模型配置: {deep_model} - {deep_model_config}")
-                else:
-                    logger.warning("⚠️ MongoDB 中没有找到系统配置，将使用默认参数")
+                deep_merged = _run_async_in_sync(unified_llm_service.get_model_config(deep_model))
+                deep_model_config = _get_model_config_dict(deep_merged)
+                if deep_model_config:
+                    logger.info(f"✅ 通过 unified_llm_service 读取深度模型配置: {deep_model} - {deep_model_config}")
             except Exception as e:
-                logger.warning(f"⚠️ 从 MongoDB 读取模型配置失败: {e}，将使用默认参数")
+                logger.warning(f"⚠️ 通过 unified_llm_service 读取模型配置失败: {e}，将使用默认参数")
 
             # 根据模型名称动态查找供应商（同步版本）
             from tradingagents.llm_clients.provider_keys import normalize_provider_key
@@ -632,35 +623,21 @@ class AnalysisService:
             if progress_callback:
                 progress_callback(10, "初始化分析引擎...")
             
-            # 使用标准配置函数创建完整配置 - 与单股分析保持一致
+            # 通过 unified_llm_service 获取模型配置（Requirements: 4.5）
             from app.core.unified_config import unified_config
 
             quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
             deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
 
-            # 🔧 从数据库读取模型的完整配置参数
+            # 🔧 通过 unified_llm_service 获取模型的完整配置参数
             quick_model_config = None
             deep_model_config = None
-            llm_configs = unified_config.get_llm_configs()
 
-            for llm_config in llm_configs:
-                if llm_config.model_name == quick_model:
-                    quick_model_config = {
-                        "max_tokens": llm_config.max_tokens,
-                        "temperature": llm_config.temperature,
-                        "timeout": llm_config.timeout,
-                        "retry_times": llm_config.retry_times,
-                        "api_base": llm_config.api_base
-                    }
+            quick_merged = await unified_llm_service.get_model_config(quick_model)
+            quick_model_config = _get_model_config_dict(quick_merged)
 
-                if llm_config.model_name == deep_model:
-                    deep_model_config = {
-                        "max_tokens": llm_config.max_tokens,
-                        "temperature": llm_config.temperature,
-                        "timeout": llm_config.timeout,
-                        "retry_times": llm_config.retry_times,
-                        "api_base": llm_config.api_base
-                    }
+            deep_merged = await unified_llm_service.get_model_config(deep_model)
+            deep_model_config = _get_model_config_dict(deep_merged)
 
             # 根据模型名称动态查找供应商
             from tradingagents.llm_clients.provider_keys import normalize_provider_key

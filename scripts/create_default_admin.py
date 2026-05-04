@@ -24,10 +24,15 @@ sys.path.insert(0, str(project_root))
 
 from pymongo import MongoClient
 
-
-# 配置
-MONGO_URI = "mongodb://admin:tradingagents123@localhost:27017/tradingagentscn?authSource=admin"
-DB_NAME = "tradingagentscn"
+# 从项目配置中读取数据库连接信息，确保与后端使用同一个数据库
+try:
+    from app.core.config import settings
+    MONGO_URI = settings.MONGO_URI
+    DB_NAME = settings.MONGO_DB
+except Exception:
+    # 回退到默认值
+    MONGO_URI = "mongodb://admin:tradingagents123@localhost:27017/tradingagentscn?authSource=admin"
+    DB_NAME = "tradingagentscn"
 
 
 def hash_password(password: str) -> str:

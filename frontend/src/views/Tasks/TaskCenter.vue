@@ -514,13 +514,13 @@ onUnmounted(() => {
 
 const getStatusType = (status:string): 'success' | 'info' | 'warning' | 'danger' => {
   const map: Record<string,'success'|'info'|'warning'|'danger'> = {
-    pending: 'info', processing: 'warning', completed: 'success', failed: 'danger', cancelled: 'info'
+    pending: 'info', processing: 'warning', running: 'warning', completed: 'success', failed: 'danger', cancelled: 'info'
   }
   return map[status] || 'info'
 }
 import { formatDateTime } from '@/utils/datetime'
 
-const getStatusText = (status:string) => ({ pending:'等待中', processing:'处理中', completed:'已完成', failed:'失败', cancelled:'已取消' } as any)[status] || status
+const getStatusText = (status:string) => ({ pending:'等待中', processing:'进行中', running:'进行中', completed:'已完成', failed:'失败', cancelled:'已取消' } as any)[status] || status
 const formatTime = (t:string) => t ? formatDateTime(t) : '-'
 </script>
 

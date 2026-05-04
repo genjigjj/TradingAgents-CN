@@ -23,18 +23,21 @@
       </template>
       <el-menu-item index="/analysis/single">单股分析</el-menu-item>
       <el-menu-item index="/analysis/batch">批量分析</el-menu-item>
-      <!-- 新增：将分析报告作为股票分析的子菜单 -->
-      <el-menu-item index="/reports">分析报告</el-menu-item>
     </el-sub-menu>
-
-    <el-menu-item index="/tasks">
-      <el-icon><List /></el-icon>
-      <template #title>任务中心</template>
-    </el-menu-item>
 
     <el-menu-item index="/screening">
       <el-icon><Search /></el-icon>
       <template #title>股票筛选</template>
+    </el-menu-item>
+
+    <el-menu-item index="/main-force">
+      <el-icon><TrendCharts /></el-icon>
+      <template #title>主力选股</template>
+    </el-menu-item>
+
+    <el-menu-item index="/longhubang">
+      <el-icon><DataAnalysis /></el-icon>
+      <template #title>龙虎榜</template>
     </el-menu-item>
 
     <el-menu-item index="/favorites">
@@ -42,19 +45,21 @@
       <template #title>我的自选股</template>
     </el-menu-item>
 
+    <el-menu-item index="/reports">
+      <el-icon><Document /></el-icon>
+      <template #title>分析报告</template>
+    </el-menu-item>
+
+    <el-menu-item index="/tasks">
+      <el-icon><List /></el-icon>
+      <template #title>任务中心</template>
+    </el-menu-item>
+
     <el-menu-item index="/paper">
       <el-icon><CreditCard /></el-icon>
       <template #title>模拟交易</template>
     </el-menu-item>
 
-
-    <!-- 分析报告已移至“股票分析”子菜单，保留注释便于追踪 -->
-    <!--
-    <el-menu-item index="/reports">
-      <el-icon><Document /></el-icon>
-      <template #title>分析报告</template>
-    </el-menu-item>
-    -->
 
     <el-sub-menu index="/settings">
       <template #title>
@@ -109,10 +114,11 @@ import {
   Search,
   Star,
   List,
-  /* Document 移除：不再使用顶级分析报告菜单图标 */
+  Document,
   Setting,
   InfoFilled,
-  CreditCard
+  CreditCard,
+  DataAnalysis
 } from '@element-plus/icons-vue'
 
 const route = useRoute()

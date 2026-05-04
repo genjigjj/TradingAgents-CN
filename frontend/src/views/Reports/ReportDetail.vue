@@ -354,6 +354,16 @@ const fetchReportDetail = async () => {
 
     const result = await response.json()
 
+    console.log('📊 [ReportDetail] 接口返回:', {
+      success: result.success,
+      hasData: !!result.data,
+      dataKeys: result.data ? Object.keys(result.data) : [],
+      reportsKeys: result.data?.reports ? Object.keys(result.data.reports) : [],
+      stockName: result.data?.stock_name,
+      stockSymbol: result.data?.stock_symbol,
+      summary: result.data?.summary?.substring(0, 100),
+    })
+
     if (result.success) {
       report.value = result.data
 
@@ -858,7 +868,21 @@ const getModuleDisplayName = (moduleName: string) => {
     investment_plan: '📋 投资建议',
     investment_debate_state: '🔬 研究团队决策（旧）',
     risk_debate_state: '⚖️ 风险管理团队（旧）',
-    detailed_analysis: '📄 详细分析'
+    detailed_analysis: '📄 详细分析',
+
+    // 主力选股分析师
+    fund_flow_analyst: '💰 资金流向分析',
+    industry_analyst: '📊 行业板块分析',
+    fundamental_analyst: '📈 财务基本面分析',
+    comprehensive_researcher: '👔 综合研究员',
+    recommended_stocks: '⭐ 精选推荐',
+
+    // 龙虎榜分析师
+    chief: '👔 首席策略师',
+    youzi: '🎯 游资行为分析师',
+    stock: '📈 个股潜力分析师',
+    theme: '🔥 题材追踪分析师',
+    risk: '🛡️ 风险控制专家'
   }
   // 未匹配到时，做一个友好的回退：下划线转空格
   return nameMap[moduleName] || moduleName.replace(/_/g, ' ')

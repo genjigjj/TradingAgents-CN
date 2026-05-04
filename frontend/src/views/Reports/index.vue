@@ -11,6 +11,15 @@
       </p>
     </div>
 
+    <!-- 报告类型切换 -->
+    <el-card class="tabs-card" shadow="never">
+      <el-tabs v-model="activeReportType" @tab-change="handleReportTypeChange">
+        <el-tab-pane label="股票分析" name="stock_analysis" />
+        <el-tab-pane label="主力选股" name="main_force_overview" />
+        <el-tab-pane label="龙虎榜分析" name="longhubang_analysis" />
+      </el-tabs>
+    </el-card>
+
     <!-- 筛选和操作栏 -->
     <el-card class="filter-card" shadow="never">
       <el-row :gutter="16" align="middle">
@@ -224,6 +233,7 @@ const selectedReports = ref<ReportListItem[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
 const totalReports = ref(0)
+const activeReportType = ref('stock_analysis')
 
 const reports = ref<ReportListItem[]>([])
 
@@ -239,7 +249,8 @@ const fetchReports = async () => {
   try {
     const params = new URLSearchParams({
       page: currentPage.value.toString(),
-      page_size: pageSize.value.toString()
+      page_size: pageSize.value.toString(),
+      report_type: activeReportType.value,
     })
 
     if (searchKeyword.value) {
@@ -287,6 +298,11 @@ const handleSearch = () => {
 }
 
 const handleDateChange = () => {
+  currentPage.value = 1
+  fetchReports()
+}
+
+const handleReportTypeChange = () => {
   currentPage.value = 1
   fetchReports()
 }
@@ -433,6 +449,9 @@ const refreshReports = () => {
 const getTypeColor = (type: string): TagType => {
   const colorMap: Record<string, TagType> = {
     single: 'primary',
+    stock_analysis: 'primary',
+    main_force_overview: 'warning',
+    longhubang_analysis: 'success',
     batch: 'success',
     portfolio: 'warning'
   }
@@ -442,6 +461,9 @@ const getTypeColor = (type: string): TagType => {
 const getTypeText = (type: string) => {
   const textMap: Record<string, string> = {
     single: '单股分析',
+    stock_analysis: '单股分析',
+    main_force_overview: '主力选股',
+    longhubang_analysis: '龙虎榜分析',
     batch: '批量分析',
     portfolio: '投资组合'
   }
@@ -508,6 +530,10 @@ onMounted(() => {
       color: var(--el-text-color-regular);
       margin: 0;
     }
+  }
+
+  .tabs-card {
+    margin-bottom: 16px;
   }
 
   .filter-card {

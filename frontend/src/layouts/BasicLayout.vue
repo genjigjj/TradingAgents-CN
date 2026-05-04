@@ -55,16 +55,10 @@
       <!-- 页面内容 -->
       <main class="main-content">
         <div class="content-wrapper">
-          <router-view v-slot="{ Component, route }">
-            <transition
-              :name="route.meta.transition || 'fade'"
-              mode="out-in"
-              appear
-            >
-              <keep-alive :include="keepAliveComponents">
-                <component :is="Component" :key="route.fullPath" />
-              </keep-alive>
-            </transition>
+          <router-view v-slot="{ Component }">
+            <keep-alive :include="keepAliveComponents">
+              <component :is="Component" />
+            </keep-alive>
           </router-view>
         </div>
       </main>
@@ -280,7 +274,7 @@ watch(() => route.fullPath, () => {
 // 路由过渡动画
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.3s ease;
+  transition: opacity 0.15s ease;
 }
 
 .fade-enter-from,

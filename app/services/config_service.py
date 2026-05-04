@@ -20,6 +20,7 @@ from app.models.config import (
     MarketCategory, DataSourceGrouping, ModelCatalog, ModelInfo
 )
 from tradingagents.llm_clients.provider_keys import canonical_aliases, normalize_provider_key
+from app.services.unified_llm_service import unified_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,9 @@ class ConfigService:
 
             if config_data:
                 print(f"📊 从数据库获取配置，版本: {config_data.get('version', 0)}, LLM配置数量: {len(config_data.get('llm_configs', []))}")
-                return SystemConfig(**config_data)
+                config = SystemConfig(**config_data)
+                self._backfill_llm_api_keys(config)
+                return config
 
             # 如果没有配置，创建默认配置
             print("⚠️ 数据库中没有配置，创建默认配置")
@@ -415,11 +418,45 @@ class ConfigService:
                 unified_system_config = await unified_config.get_unified_system_config()
                 if unified_system_config:
                     print("🔄 回退到统一配置管理器")
+                    self._backfill_llm_api_keys(unified_system_config)
                     return unified_system_config
             except Exception as e2:
                 print(f"从统一配置获取也失败: {e2}")
 
             return None
+
+    def _backfill_llm_api_keys(self, config: SystemConfig) -> None:
+        """
+        对 LLM 配置中空的 api_key 从环境变量回填。
+
+        解决配置来源不一致的问题：MongoDB system_configs 中的 api_key 可能为空，
+        但用户已在 .env 中配置了对应 provider 的 API Key。
+        优先级：MongoDB 中的有效值 > .env 环境变量 > 空值
+        """
+        import os
+        try:
+            from tradingagents.llm_clients.provider_keys import env_key_for_provider, normalize_provider_key
+            from app.utils.api_key_utils import is_valid_api_key
+        except ImportError:
+            return
+
+        if not config or not config.llm_configs:
+            return
+
+        for llm in config.llm_configs:
+            if is_valid_api_key(llm.api_key):
+                continue  # 已有有效 Key，跳过
+
+            # 尝试从环境变量回填
+            provider_key = normalize_provider_key(llm.provider)
+            env_key_name = env_key_for_provider(provider_key)
+            if not env_key_name:
+                continue
+
+            env_value = os.getenv(env_key_name, "")
+            if is_valid_api_key(env_value):
+                llm.api_key = env_value
+                print(f"🔄 [配置回填] {llm.provider}/{llm.model_name}: 从 {env_key_name} 回填 API Key")
     
     async def _create_default_config(self) -> SystemConfig:
         """创建默认系统配置"""
@@ -2990,7 +3027,18 @@ class ConfigService:
             # 修复：matched_count > 0 表示找到了记录（即使没有修改）
             # modified_count > 0 只有在实际修改了字段时才为真
             # 如果记录存在但值相同，modified_count 为 0，但这不应该返回 404
-            return result.matched_count > 0
+            success = result.matched_count > 0
+
+            # 更新成功后，触发级联同步（同步 system_configs.llm_configs）
+            if success:
+                try:
+                    sync_result = await unified_llm_service.update_provider(provider_id, update_data)
+                    logger.info("级联同步完成: provider_id=%s, sync_result=%s", provider_id, sync_result.get("sync_result"))
+                except Exception as e:
+                    # 级联同步失败不影响原始更新操作
+                    logger.error("级联同步失败（不影响原始更新）: provider_id=%s, error=%s", provider_id, e)
+
+            return success
         except Exception as e:
             print(f"更新厂家失败: {e}")
             import traceback
@@ -3076,7 +3124,18 @@ class ConfigService:
                     {"$set": {"is_active": is_active, "updated_at": now_tz()}}
                 )
 
-            return result.matched_count > 0
+            success = result.matched_count > 0
+
+            # 禁用时触发级联禁用（同步禁用 system_configs.llm_configs 中引用该厂家的模型）
+            if success and not is_active:
+                try:
+                    sync_result = await unified_llm_service.disable_provider(provider_id)
+                    logger.info("级联禁用完成: provider_id=%s, sync_result=%s", provider_id, sync_result.get("sync_result"))
+                except Exception as e:
+                    # 级联禁用失败不影响原始切换操作
+                    logger.error("级联禁用失败（不影响原始切换）: provider_id=%s, error=%s", provider_id, e)
+
+            return success
         except Exception as e:
             print(f"切换厂家状态失败: {e}")
             return False

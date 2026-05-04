@@ -134,13 +134,14 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                     provider_doc = providers_collection.find_one({"name": provider})
 
                     # 🔥 确定 API Key（优先级：模型配置 > 厂家配置 > 环境变量）
+                    from app.utils.api_key_utils import is_valid_api_key
                     api_key = None
-                    if model_api_key and model_api_key.strip() and model_api_key != "your-api-key":
+                    if is_valid_api_key(model_api_key):
                         api_key = model_api_key
                         logger.info(f"✅ [同步查询] 使用模型配置的 API Key")
                     elif provider_doc and provider_doc.get("api_key"):
                         provider_api_key = provider_doc["api_key"]
-                        if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                        if is_valid_api_key(provider_api_key):
                             api_key = provider_api_key
                             logger.info(f"✅ [同步查询] 使用厂家配置的 API Key")
 
@@ -200,7 +201,8 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
                 if provider_doc.get("api_key"):
                     provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                    from app.utils.api_key_utils import is_valid_api_key as _is_valid
+                    if _is_valid(provider_api_key):
                         api_key = provider_api_key
                         logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
 
@@ -259,7 +261,8 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
                 if provider_doc.get("api_key"):
                     provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
+                    from app.utils.api_key_utils import is_valid_api_key as _is_valid
+                    if _is_valid(provider_api_key):
                         api_key = provider_api_key
                         logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
 
@@ -306,7 +309,8 @@ def _get_env_api_key_for_provider(provider: str) -> str:
         env_key_name = "AIHUBMIX_API_KEY"
     if env_key_name:
         api_key = os.getenv(env_key_name)
-        if api_key and api_key.strip() and api_key != "your-api-key":
+        from app.utils.api_key_utils import is_valid_api_key
+        if is_valid_api_key(api_key):
             return api_key
 
     return None
@@ -841,9 +845,16 @@ class SimpleAnalysisService:
                 logger.error(error_msg)
                 logger.error(f"💡 建议: {validation_result.suggestion}")
 
-                # 构建用户友好的错误消息
+                # 根据错误类型构建用户友好的错误消息
+                err_text = validation_result.error_message or ""
+                if any(kw in err_text for kw in ["网络", "数据源", "历史数据", "连接", "超时", "数据准备失败"]):
+                    # 数据源/网络问题，不是代码无效
+                    error_title = "❌ 数据获取失败"
+                else:
+                    error_title = "❌ 股票代码无效"
+
                 user_friendly_error = (
-                    f"❌ 股票代码无效\n\n"
+                    f"{error_title}\n\n"
                     f"{validation_result.error_message}\n\n"
                     f"💡 {validation_result.suggestion}"
                 )
@@ -2074,7 +2085,6 @@ class SimpleAnalysisService:
                 query = {"$or": or_conditions}
 
                 if task_status:
-                    # 使用映射后的状态值（TaskStatus枚举的value）
                     query["status"] = task_status.value
                     logger.info(f"📋 [Tasks] 添加状态过滤: {task_status.value}")
 

@@ -982,7 +982,7 @@ class AKShareProvider(BaseStockDataProvider):
         period: str = "daily"
     ) -> Optional[pd.DataFrame]:
         """
-        获取历史行情数据
+        获取历史行情数据（优先东方财富接口，失败后自动降级到新浪/腾讯接口）
 
         Args:
             code: 股票代码
@@ -1011,17 +1011,51 @@ class AKShareProvider(BaseStockDataProvider):
             start_date_formatted = start_date.replace('-', '')
             end_date_formatted = end_date.replace('-', '')
 
-            # 获取历史数据
-            def fetch_historical_data():
-                return self.ak.stock_zh_a_hist(
-                    symbol=code,
-                    period=ak_period,
-                    start_date=start_date_formatted,
-                    end_date=end_date_formatted,
-                    adjust="qfq"  # 前复权
-                )
+            hist_df = None
 
-            hist_df = await asyncio.to_thread(fetch_historical_data)
+            # 方案1：东方财富接口 (stock_zh_a_hist)
+            try:
+                def fetch_from_eastmoney():
+                    return self.ak.stock_zh_a_hist(
+                        symbol=code,
+                        period=ak_period,
+                        start_date=start_date_formatted,
+                        end_date=end_date_formatted,
+                        adjust="qfq"
+                    )
+
+                hist_df = await asyncio.to_thread(fetch_from_eastmoney)
+                if hist_df is not None and not hist_df.empty:
+                    logger.debug(f"✅ {code}东方财富接口获取成功: {len(hist_df)}条")
+            except Exception as e:
+                logger.warning(f"⚠️ {code}东方财富接口失败: {e}，尝试新浪/腾讯接口")
+                hist_df = None
+
+            # 方案2：新浪/腾讯接口 (stock_zh_a_daily)，仅支持 daily 周期
+            if (hist_df is None or hist_df.empty) and ak_period == "daily":
+                try:
+                    # stock_zh_a_daily 需要带交易所前缀的代码
+                    if code.startswith(('60', '68', '90')):
+                        prefixed_code = f"sh{code}"
+                    elif code.startswith(('00', '30', '20')):
+                        prefixed_code = f"sz{code}"
+                    else:
+                        prefixed_code = f"sz{code}"
+
+                    def fetch_from_sina():
+                        return self.ak.stock_zh_a_daily(
+                            symbol=prefixed_code,
+                            start_date=start_date_formatted,
+                            end_date=end_date_formatted,
+                            adjust="qfq"
+                        )
+
+                    hist_df = await asyncio.to_thread(fetch_from_sina)
+                    if hist_df is not None and not hist_df.empty:
+                        logger.info(f"✅ {code}新浪/腾讯接口获取成功: {len(hist_df)}条")
+                except Exception as e2:
+                    logger.warning(f"⚠️ {code}新浪/腾讯接口也失败: {e2}")
+                    hist_df = None
 
             if hist_df is None or hist_df.empty:
                 logger.warning(f"⚠️ {code}历史数据为空")

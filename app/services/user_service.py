@@ -32,15 +32,22 @@ class UserService:
         self.db = self.client[settings.MONGO_DB]
         self.users_collection = self.db.users
 
-    def close(self):
+    def close(self, _silent: bool = False):
         """关闭数据库连接"""
         if hasattr(self, 'client') and self.client:
             self.client.close()
-            logger.info("✅ UserService MongoDB 连接已关闭")
+            if not _silent:
+                logger.info("✅ UserService MongoDB 连接已关闭")
 
     def __del__(self):
-        """析构函数，确保连接被关闭"""
-        self.close()
+        """析构函数，确保连接被关闭（静默模式，不调用日志）"""
+        try:
+            # Python 关闭阶段 logging 子系统可能已被销毁，
+            # 此时调用 logger 会导致 handler.emit() 内部报错并输出到 stderr。
+            # 因此 __del__ 中使用 _silent=True 完全跳过日志。
+            self.close(_silent=True)
+        except Exception:
+            pass
     
     @staticmethod
     def hash_password(password: str) -> str:
@@ -120,6 +127,15 @@ class UserService:
         """用户认证"""
         try:
             logger.info(f"🔍 [authenticate_user] 开始认证用户: {username}")
+            logger.info(f"🔍 [authenticate_user] 数据库: {self.db.name}, 集合: {self.users_collection.name}")
+
+            # 打印 users 集合文档总数，帮助判断是否初始化过
+            total_users = self.users_collection.count_documents({})
+            logger.info(f"🔍 [authenticate_user] users 集合当前文档数: {total_users}")
+
+            if total_users > 0:
+                all_usernames = [doc.get("username") for doc in self.users_collection.find({}, {"username": 1})]
+                logger.info(f"🔍 [authenticate_user] 已有用户列表: {all_usernames}")
 
             # 查找用户
             user_doc = self.users_collection.find_one({"username": username})
@@ -127,6 +143,8 @@ class UserService:
 
             if not user_doc:
                 logger.warning(f"❌ [authenticate_user] 用户不存在: {username}")
+                if total_users == 0:
+                    logger.warning(f"⚠️ [authenticate_user] users 集合为空，请先运行: python scripts/create_default_admin.py")
                 return None
 
             logger.info(f"🔍 [authenticate_user] 用户信息: username={user_doc.get('username')}, email={user_doc.get('email')}, is_active={user_doc.get('is_active')}")

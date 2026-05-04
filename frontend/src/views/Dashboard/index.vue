@@ -90,6 +90,28 @@
               <el-icon class="action-arrow"><ArrowRight /></el-icon>
             </div>
 
+            <div class="action-item" @click="goToMainForce">
+              <div class="action-icon">
+                <el-icon><TrendCharts /></el-icon>
+              </div>
+              <div class="action-content">
+                <h3>主力选股</h3>
+                <p>基于主力资金流向，AI 精选优质标的</p>
+              </div>
+              <el-icon class="action-arrow"><ArrowRight /></el-icon>
+            </div>
+
+            <div class="action-item" @click="goToLonghubang">
+              <div class="action-icon">
+                <el-icon><DataAnalysis /></el-icon>
+              </div>
+              <div class="action-content">
+                <h3>龙虎榜分析</h3>
+                <p>AI 智能评分，洞察游资动向与热点</p>
+              </div>
+              <el-icon class="action-arrow"><ArrowRight /></el-icon>
+            </div>
+
             <div class="action-item" @click="goToQueue">
               <div class="action-icon">
                 <el-icon><List /></el-icon>
@@ -310,7 +332,8 @@ import {
   List,
   ArrowRight,
   InfoFilled,
-  Reading
+  Reading,
+  DataAnalysis
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { AnalysisTask, AnalysisStatus } from '@/types/analysis'
@@ -369,6 +392,14 @@ const goToBatchAnalysis = () => {
 
 const goToScreening = () => {
   router.push('/screening')
+}
+
+const goToMainForce = () => {
+  router.push('/main-force')
+}
+
+const goToLonghubang = () => {
+  router.push('/longhubang')
 }
 
 const goToQueue = () => {

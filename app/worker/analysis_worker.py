@@ -131,44 +131,54 @@ class AnalysisWorker:
         logger.info(f"🔄 Worker {self.worker_id} 工作循环结束")
 
     async def _process_task(self, task_data: Dict[str, Any]):
-        """处理单个任务"""
+        """处理单个任务，根据 task_type 路由到对应的服务执行方法。
+
+        路由规则：
+        - ``main_force_overview`` → MainForceService.execute_overview_analysis
+        - ``main_force_batch``    → MainForceService.execute_single_deep_analysis
+        - ``longhubang_analysis`` → LonghubangService.execute_ai_analysis
+        - 其他 / 未知（含 ``stock_analysis``）→ AnalysisService.execute_analysis_task（向后兼容）
+        """
         task_id = task_data.get("id")
         stock_code = task_data.get("symbol")
         user_id = task_data.get("user")
 
-        logger.info(f"📊 开始处理任务: {task_id} - {stock_code}")
+        # 解析任务参数
+        parameters_dict = task_data.get("parameters", {})
+        if isinstance(parameters_dict, str):
+            import json
+            parameters_dict = json.loads(parameters_dict)
+
+        # 读取 task_type，默认回退到 stock_analysis
+        task_type = parameters_dict.get("task_type", "stock_analysis")
+
+        logger.info(f"📊 开始处理任务: {task_id} - {stock_code} (task_type={task_type})")
 
         self.current_task = task_id
         success = False
 
         try:
-            # 构建分析任务对象
-            parameters_dict = task_data.get("parameters", {})
-            if isinstance(parameters_dict, str):
-                import json
-                parameters_dict = json.loads(parameters_dict)
+            if task_type == "main_force_overview":
+                # 主力选股整体分析 → MainForceService
+                await self._handle_main_force_overview(task_id, parameters_dict)
 
-            parameters = AnalysisParameters(**parameters_dict)
+            elif task_type == "main_force_batch":
+                # 主力选股批量深度分析（单股） → MainForceService
+                await self._handle_main_force_batch(task_id, stock_code, parameters_dict)
 
-            task = AnalysisTask(
-                task_id=task_id,
-                user_id=user_id,
-                stock_code=stock_code,
-                batch_id=task_data.get("batch_id"),
-                parameters=parameters
-            )
+            elif task_type == "longhubang_analysis":
+                # 龙虎榜 AI 分析 → LonghubangService
+                await self._handle_longhubang_analysis(task_id, parameters_dict)
 
-            # 执行分析
-            result = await get_analysis_service().execute_analysis_task(
-                task,
-                progress_callback=self._progress_callback
-            )
+            else:
+                # 向后兼容：默认路由到现有 AnalysisService
+                await self._handle_stock_analysis(task_id, user_id, stock_code, task_data, parameters_dict)
 
             success = True
-            logger.info(f"✅ 任务完成: {task_id} - 耗时: {result.execution_time:.2f}秒")
+            logger.info(f"✅ 任务完成: {task_id} (task_type={task_type})")
 
         except Exception as e:
-            logger.error(f"❌ 任务执行失败: {task_id} - {e}")
+            logger.error(f"❌ 任务执行失败: {task_id} (task_type={task_type}) - {e}")
             logger.error(traceback.format_exc())
 
         finally:
@@ -179,6 +189,83 @@ class AnalysisWorker:
                 logger.error(f"确认任务失败: {task_id} - {e}")
 
             self.current_task = None
+
+    # ------------------------------------------------------------------
+    # task_type 路由处理方法
+    # ------------------------------------------------------------------
+
+    async def _handle_main_force_overview(
+        self, task_id: str, parameters: Dict[str, Any]
+    ):
+        """处理主力选股整体分析任务"""
+        from app.services.main_force_service import MainForceService
+
+        service = MainForceService()
+        candidates = parameters.get("candidates", [])
+        analysis_params = parameters.get("analysis_params", {})
+
+        await service.execute_overview_analysis(
+            task_id=task_id,
+            candidates=candidates,
+            params=analysis_params,
+        )
+
+    async def _handle_main_force_batch(
+        self, task_id: str, symbol: str, parameters: Dict[str, Any]
+    ):
+        """处理主力选股单股深度分析任务"""
+        from app.services.main_force_service import MainForceService
+
+        service = MainForceService()
+        main_force_params = parameters.get("main_force_params", {})
+
+        await service.execute_single_deep_analysis(
+            task_id=task_id,
+            symbol=symbol,
+            params=main_force_params,
+        )
+
+    async def _handle_longhubang_analysis(
+        self, task_id: str, parameters: Dict[str, Any]
+    ):
+        """处理龙虎榜 AI 分析任务"""
+        from app.services.longhubang_service import LonghubangService
+
+        service = LonghubangService()
+        data_summary = parameters.get("data_summary", {})
+        scoring = parameters.get("scoring", [])
+
+        await service.execute_ai_analysis(
+            task_id=task_id,
+            data_summary=data_summary,
+            scoring=scoring,
+        )
+
+    async def _handle_stock_analysis(
+        self,
+        task_id: str,
+        user_id: str,
+        stock_code: str,
+        task_data: Dict[str, Any],
+        parameters_dict: Dict[str, Any],
+    ):
+        """处理现有的股票分析任务（向后兼容）"""
+        parameters = AnalysisParameters(**parameters_dict)
+
+        task = AnalysisTask(
+            task_id=task_id,
+            user_id=user_id,
+            stock_code=stock_code,
+            batch_id=task_data.get("batch_id"),
+            parameters=parameters,
+        )
+
+        result = await get_analysis_service().execute_analysis_task(
+            task,
+            progress_callback=self._progress_callback,
+        )
+
+        logger.info(f"✅ 股票分析完成: {task_id} - 耗时: {result.execution_time:.2f}秒")
 
     def _progress_callback(self, progress: int, message: str):
         """进度回调函数"""

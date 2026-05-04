@@ -98,6 +98,81 @@ def _build_report_query(report_id: str) -> Dict[str, Any]:
         pass
     return {"$or": ors}
 
+
+def _format_comprehensive_researcher_report(raw_text: str, recommended: list) -> str:
+    """
+    将综合研究员的 JSON 响应转换为可读的 Markdown 报告。
+
+    综合研究员返回的是包含 JSON 代码块的 LLM 原始响应，
+    需要解析 JSON 并格式化为 Markdown 文本。
+    """
+    # 尝试从原始文本中提取 JSON
+    import re
+    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
+    parsed = None
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(1))
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # 如果无法解析 JSON，也尝试直接解析整个文本
+    if not parsed:
+        try:
+            parsed = json.loads(raw_text.strip())
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # 如果解析失败，直接返回原始文本（可能本身就是 Markdown）
+    if not parsed:
+        return raw_text
+
+    lines = ["# 综合研究员精选推荐\n"]
+
+    # 总结
+    summary = parsed.get("summary", "")
+    if summary:
+        lines.append(f"## 综合分析总结\n")
+        lines.append(f"{summary}\n")
+
+    # 推荐列表
+    recs = parsed.get("recommendations", [])
+    if recs:
+        lines.append(f"## 精选推荐（共 {len(recs)} 只）\n")
+        for i, rec in enumerate(recs, 1):
+            rank = rec.get("rank", i)
+            name = rec.get("name", "")
+            code = rec.get("code", "")
+            lines.append(f"### {rank}. {name}（{code}）\n")
+
+            reason = rec.get("reason", "")
+            if reason:
+                lines.append(f"**核心推荐理由：** {reason}\n")
+
+            highlights = rec.get("highlights", [])
+            if highlights:
+                lines.append("**投资亮点：**")
+                for h in highlights:
+                    lines.append(f"- {h}")
+                lines.append("")
+
+            risks = rec.get("risks", [])
+            if risks:
+                lines.append("**风险提示：**")
+                for r_item in risks:
+                    lines.append(f"- {r_item}")
+                lines.append("")
+
+            position = rec.get("position", "")
+            period = rec.get("period", rec.get("investment_period", ""))
+            if position or period:
+                lines.append(f"- **建议仓位：** {position or '-'}")
+                lines.append(f"- **投资周期：** {period or '-'}")
+                lines.append("")
+
+    return "\n".join(lines)
+
+
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 class ReportFilter(BaseModel):
@@ -125,16 +200,27 @@ async def get_reports_list(
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
     stock_code: Optional[str] = Query(None, description="股票代码"),
+    report_type: Optional[str] = Query(None, description="报告类型筛选（stock_analysis/main_force_overview）"),
     user: dict = Depends(get_current_user)
 ):
     """获取分析报告列表"""
     try:
-        logger.info(f"🔍 获取报告列表: 用户={user['id']}, 页码={page}, 每页={page_size}, 市场={market_filter}")
+        logger.info(f"🔍 获取报告列表: 用户={user['id']}, 页码={page}, 每页={page_size}, 市场={market_filter}, 类型={report_type}")
 
         db = get_mongo_db()
 
         # 构建查询条件
         query = {}
+
+        # 报告类型筛选
+        logger.info(f"📋 [REPORT_TYPE] 收到 report_type={report_type!r} (type={type(report_type).__name__})")
+        if report_type == "main_force_overview":
+            query["task_type"] = "main_force_overview"
+        elif report_type == "longhubang_analysis":
+            query["task_type"] = "longhubang_analysis"
+        elif report_type == "stock_analysis":
+            # 排除主力选股和龙虎榜报告，只显示单股分析
+            query["task_type"] = {"$nin": ["main_force_overview", "longhubang_analysis"]}
 
         # 搜索关键词
         if search_keyword:
@@ -202,19 +288,20 @@ async def get_reports_list(
                 "title": f"{stock_name}({stock_code}) 分析报告",
                 "stock_code": stock_code,
                 "stock_name": stock_name,
-                "market_type": market_type,  # 🔥 添加市场类型字段
-                "model_info": doc.get("model_info", "Unknown"),  # 🔥 添加模型信息字段
-                "type": "single",  # 目前主要是单股分析
-                "format": "markdown",  # 主要格式
+                "market_type": market_type,
+                "model_info": doc.get("model_info", "Unknown"),
+                "type": doc.get("task_type", "single"),
+                "format": "markdown",
                 "status": doc.get("status", "completed"),
                 "created_at": created_at_tz.isoformat() if created_at_tz else str(created_at),
                 "analysis_date": doc.get("analysis_date", ""),
                 "analysts": doc.get("analysts", []),
                 "research_depth": doc.get("research_depth", 1),
                 "summary": doc.get("summary", ""),
-                "file_size": len(str(doc.get("reports", {}))),  # 估算大小
+                "file_size": len(str(doc.get("reports", {}))),
                 "source": doc.get("source", "unknown"),
-                "task_id": doc.get("task_id", "")
+                "task_id": doc.get("task_id", ""),
+                "task_type": doc.get("task_type", "stock_analysis"),
             }
             reports.append(report)
 
@@ -255,12 +342,36 @@ async def get_report_detail(
             logger.info(f"⚠️ 未在analysis_reports找到，尝试从analysis_tasks还原: {report_id}")
             tasks_doc = await db.analysis_tasks.find_one(
                 {"$or": [{"task_id": report_id}, {"result.analysis_id": report_id}]},
-                {"result": 1, "task_id": 1, "stock_code": 1, "created_at": 1, "completed_at": 1}
+                {"result": 1, "task_id": 1, "task_type": 1, "symbol": 1, "stock_code": 1, "created_at": 1, "completed_at": 1}
             )
             if not tasks_doc or not tasks_doc.get("result"):
-                raise HTTPException(status_code=404, detail="报告不存在")
+                # 主力选股任务可能 result 字段为空（旧数据或写入失败），
+                # 尝试从 main_force_batch_history 集合中恢复报告数据
+                task_type_check = tasks_doc.get("task_type") if tasks_doc else None
+                if task_type_check == "main_force_overview" and tasks_doc:
+                    logger.info(f"⚠️ [REPORT] 主力选股 result 为空，尝试从 batch_history 恢复: {report_id}")
+                    history_doc = await db.main_force_batch_history.find_one(
+                        {"task_id": report_id},
+                        {"overview_analysis": 1, "recommended_stocks": 1, "created_at": 1}
+                    )
+                    if history_doc:
+                        # 用 batch_history 中的数据构造 result
+                        tasks_doc["result"] = {
+                            "success": True,
+                            "overview_analysis": history_doc.get("overview_analysis", {}),
+                            "recommended_stocks": history_doc.get("recommended_stocks", []),
+                        }
+                        logger.info(f"✅ [REPORT] 从 batch_history 恢复成功: {report_id}")
+                    else:
+                        logger.warning(f"❌ [REPORT] analysis_tasks 和 batch_history 中均未找到报告数据: report_id={report_id}")
+                        raise HTTPException(status_code=404, detail="报告不存在")
+                else:
+                    logger.warning(f"❌ [REPORT] analysis_tasks 中未找到 result 字段: report_id={report_id}, tasks_doc存在={bool(tasks_doc)}, task_type={task_type_check}")
+                    raise HTTPException(status_code=404, detail="报告不存在")
 
             r = tasks_doc["result"] or {}
+            task_type = tasks_doc.get("task_type", "stock_analysis")
+            logger.info(f"📊 [REPORT] 从 analysis_tasks 还原报告: report_id={report_id}, task_type={task_type}, result_keys={list(r.keys())}")
             created_at = tasks_doc.get("created_at")
             updated_at = tasks_doc.get("completed_at") or created_at
 
@@ -273,34 +384,155 @@ async def get_report_detail(
                     return x.isoformat()
                 return x or ""
 
-            stock_symbol = r.get("stock_symbol", r.get("stock_code", tasks_doc.get("stock_code", "")))
-            stock_name = r.get("stock_name")
-            if not stock_name:
-                stock_name = get_stock_name(stock_symbol)
+            # 主力选股整体分析：将 overview_analysis 各分析师报告映射为 reports
+            if task_type == "main_force_overview":
+                overview = r.get("overview_analysis", {})
+                recommended = r.get("recommended_stocks", [])
 
-            report = {
-                "id": tasks_doc.get("task_id", report_id),
-                "analysis_id": r.get("analysis_id", ""),
-                "stock_symbol": stock_symbol,
-                "stock_name": stock_name,  # 🔥 添加股票名称字段
-                "model_info": r.get("model_info", "Unknown"),  # 🔥 添加模型信息字段
-                "analysis_date": r.get("analysis_date", ""),
-                "status": r.get("status", "completed"),
-                "created_at": to_iso(created_at_tz),
-                "updated_at": to_iso(updated_at_tz),
-                "analysts": r.get("analysts", []),
-                "research_depth": r.get("research_depth", 1),
-                "summary": r.get("summary", ""),
-                "reports": r.get("reports", {}),
-                "source": "analysis_tasks",
-                "task_id": tasks_doc.get("task_id", report_id),
-                "recommendation": r.get("recommendation", ""),
-                "confidence_score": r.get("confidence_score", 0.0),
-                "risk_level": r.get("risk_level", "中等"),
-                "key_points": r.get("key_points", []),
-                "execution_time": r.get("execution_time", 0),
-                "tokens_used": r.get("tokens_used", 0)
-            }
+                # 将各分析师报告映射为 reports 字段
+                reports_map = {}
+                analyst_name_map = {
+                    "fund_flow_analyst": "资金流向分析",
+                    "industry_analyst": "行业板块分析",
+                    "fundamental_analyst": "财务基本面分析",
+                    "comprehensive_researcher": "综合研究员",
+                }
+                for key, content in overview.items():
+                    if isinstance(content, str) and content.strip():
+                        # 综合研究员返回的是 JSON 格式，转换为可读的 Markdown
+                        if key == "comprehensive_researcher":
+                            reports_map[key] = _format_comprehensive_researcher_report(content, recommended)
+                        else:
+                            reports_map[key] = content
+
+                # 将推荐股票列表格式化为 Markdown 文本，追加到 reports
+                if recommended:
+                    rec_lines = ["# 精选推荐\n"]
+                    for i, stock in enumerate(recommended, 1):
+                        rec_lines.append(f"## {i}. {stock.get('name', '')} ({stock.get('code', '')})")
+                        if stock.get("reason"):
+                            rec_lines.append(f"**推荐理由：** {stock['reason']}")
+                        if stock.get("highlights"):
+                            highlights = stock["highlights"] if isinstance(stock["highlights"], list) else [stock["highlights"]]
+                            rec_lines.append("**投资亮点：**")
+                            for h in highlights:
+                                rec_lines.append(f"- {h}")
+                        if stock.get("risks"):
+                            risks = stock["risks"] if isinstance(stock["risks"], list) else [stock["risks"]]
+                            rec_lines.append("**风险提示：**")
+                            for risk in risks:
+                                rec_lines.append(f"- {risk}")
+                        rec_lines.append(f"- 建议仓位：{stock.get('position', '-')}")
+                        rec_lines.append(f"- 投资周期：{stock.get('period', '-')}")
+                        rec_lines.append("")
+                    reports_map["recommended_stocks"] = "\n".join(rec_lines)
+
+                # 生成摘要：使用格式化后的综合研究员报告
+                summary = reports_map.get("comprehensive_researcher", "主力选股整体分析报告")
+
+                report = {
+                    "id": tasks_doc.get("task_id", report_id),
+                    "analysis_id": "",
+                    "stock_symbol": "main_force_overview",
+                    "stock_name": "主力选股整体分析",
+                    "model_info": r.get("model_info", "Unknown"),
+                    "analysis_date": to_iso(created_at_tz) if created_at_tz else "",
+                    "status": "completed" if r.get("success") else "failed",
+                    "created_at": to_iso(created_at_tz),
+                    "updated_at": to_iso(updated_at_tz),
+                    "analysts": list(overview.keys()),
+                    "research_depth": "标准",
+                    "summary": summary,
+                    "reports": reports_map,
+                    "source": "analysis_tasks",
+                    "task_id": tasks_doc.get("task_id", report_id),
+                    "recommendation": f"精选推荐 {len(recommended)} 只股票" if recommended else "暂无推荐",
+                    "confidence_score": 0.0,
+                    "risk_level": "中等",
+                    "key_points": [f"推荐 {s.get('name', '')}({s.get('code', '')})" for s in recommended[:5]],
+                    "execution_time": 0,
+                    "tokens_used": 0,
+                }
+                logger.info(f"✅ [REPORT] 主力选股报告构建完成: reports_keys={list(reports_map.keys())}, recommended_count={len(recommended)}, overview_keys={list(overview.keys())}")
+            elif task_type == "longhubang_analysis":
+                # 龙虎榜分析：将 agents_analysis 映射为 reports
+                agents = r.get("agents_analysis", {})
+                recommended = r.get("recommended_stocks", [])
+
+                reports_map = {}
+                for key, val in agents.items():
+                    content = val.get("analysis", "") if isinstance(val, dict) else str(val)
+                    if content.strip():
+                        reports_map[key] = content
+
+                # 推荐股票格式化为 Markdown
+                if recommended:
+                    rec_lines = ["# 推荐股票\n"]
+                    for i, stock in enumerate(recommended, 1):
+                        rec_lines.append(f"## {i}. {stock.get('name', '')} ({stock.get('code', '')})")
+                        if stock.get("reason"):
+                            rec_lines.append(f"**推荐理由：** {stock['reason']}")
+                        rec_lines.append("")
+                    reports_map["recommended_stocks"] = "\n".join(rec_lines)
+
+                summary = (
+                    f"本次龙虎榜分析涵盖 {len(agents)} 位分析师报告，"
+                    f"推荐 {len(recommended)} 只股票。"
+                )
+
+                report = {
+                    "id": tasks_doc.get("task_id", report_id),
+                    "analysis_id": "",
+                    "stock_symbol": "longhubang_analysis",
+                    "stock_name": "龙虎榜分析",
+                    "model_info": r.get("model_info", "Unknown"),
+                    "analysis_date": to_iso(created_at_tz) if created_at_tz else "",
+                    "status": "completed" if r.get("success") else "failed",
+                    "created_at": to_iso(created_at_tz),
+                    "updated_at": to_iso(updated_at_tz),
+                    "analysts": list(agents.keys()),
+                    "research_depth": "标准",
+                    "summary": summary,
+                    "reports": reports_map,
+                    "source": "analysis_tasks",
+                    "task_id": tasks_doc.get("task_id", report_id),
+                    "recommendation": f"推荐 {len(recommended)} 只股票" if recommended else "暂无推荐",
+                    "confidence_score": 0.0,
+                    "risk_level": "中等",
+                    "key_points": [f"{s.get('name', '')}({s.get('code', '')})" for s in recommended[:5]],
+                    "execution_time": 0,
+                    "tokens_used": 0,
+                }
+            else:
+                # 单股分析等其他类型：按原有格式构建
+                stock_symbol = r.get("stock_symbol", r.get("stock_code", tasks_doc.get("stock_code", "")))
+                stock_name = r.get("stock_name")
+                if not stock_name:
+                    stock_name = get_stock_name(stock_symbol)
+
+                report = {
+                    "id": tasks_doc.get("task_id", report_id),
+                    "analysis_id": r.get("analysis_id", ""),
+                    "stock_symbol": stock_symbol,
+                    "stock_name": stock_name,
+                    "model_info": r.get("model_info", "Unknown"),
+                    "analysis_date": r.get("analysis_date", ""),
+                    "status": r.get("status", "completed"),
+                    "created_at": to_iso(created_at_tz),
+                    "updated_at": to_iso(updated_at_tz),
+                    "analysts": r.get("analysts", []),
+                    "research_depth": r.get("research_depth", 1),
+                    "summary": r.get("summary", ""),
+                    "reports": r.get("reports", {}),
+                    "source": "analysis_tasks",
+                    "task_id": tasks_doc.get("task_id", report_id),
+                    "recommendation": r.get("recommendation", ""),
+                    "confidence_score": r.get("confidence_score", 0.0),
+                    "risk_level": r.get("risk_level", "中等"),
+                    "key_points": r.get("key_points", []),
+                    "execution_time": r.get("execution_time", 0),
+                    "tokens_used": r.get("tokens_used", 0)
+                }
         else:
             # 转换为详细格式（analysis_reports 命中）
             stock_symbol = doc.get("stock_symbol", "")

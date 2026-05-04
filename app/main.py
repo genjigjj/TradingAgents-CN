@@ -229,6 +229,23 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    # 数据迁移：将旧配置体系数据迁移到 llm_providers 集合（Requirements: 1.3, 7.4）
+    # 迁移必须在 bridge_config_to_env 之前执行，确保环境变量桥接时能读取到最新的厂家数据
+    try:
+        from app.services.unified_llm_service import unified_llm_service
+        migration_result = await unified_llm_service.migrate_from_legacy()
+        logger.info(
+            "✅ 数据迁移完成: 迁移厂家=%d, Env_Seed=%d, 跳过=%d, 错误=%d",
+            migration_result.get("migrated_providers", 0),
+            migration_result.get("env_seed_keys", 0),
+            migration_result.get("skipped_existing_keys", 0),
+            len(migration_result.get("errors", [])),
+        )
+        if migration_result.get("fallback_to_legacy"):
+            logger.warning("⚠️  数据迁移回退到旧配置读取路径")
+    except Exception as e:
+        logger.warning(f"⚠️  数据迁移失败（不影响系统启动）: {e}")
+
     #  配置桥接：将统一配置写入环境变量，供 TradingAgents 核心库使用
     try:
         from app.core.config_bridge import bridge_config_to_env
@@ -236,6 +253,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  配置桥接失败: {e}")
         logger.warning("⚠️  TradingAgents 将使用 .env 文件中的配置")
+
+    # 注册 Config_Bridge 为配置变更事件监听器
+    # 当 LLM 厂家配置变更时，自动更新对应的环境变量
+    try:
+        from app.core.config_bridge import register_config_bridge_listener
+        register_config_bridge_listener()
+    except Exception as e:
+        logger.warning(f"⚠️  注册配置变更监听器失败: {e}")
 
     # Apply dynamic settings (log_level, enable_monitoring) from ConfigProvider
     try:
@@ -728,6 +753,12 @@ app.include_router(financial_data.router, tags=["financial-data"])
 app.include_router(news_data.router, tags=["news-data"])
 app.include_router(social_media.router, tags=["social-media"])
 app.include_router(internal_messages.router, tags=["internal-messages"])
+
+# 主力选股与龙虎榜分析模块
+from app.routers import main_force as main_force_router
+from app.routers import longhubang as longhubang_router
+app.include_router(main_force_router.router, prefix="/api/main-force", tags=["main-force"])
+app.include_router(longhubang_router.router, prefix="/api/longhubang", tags=["longhubang"])
 
 
 @app.get("/")

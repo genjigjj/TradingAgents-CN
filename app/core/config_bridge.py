@@ -1,15 +1,184 @@
 """
 配置桥接模块
 将统一配置系统的配置桥接到环境变量，供 TradingAgents 核心库使用
+
+职责单一：仅从 UnifiedLLMService 获取 LLM 配置并写入环境变量，
+不维护自己的缓存，不直接读取 Unified_Config_Manager 或 JSON 文件。
+
+配置变更事件监听：通过 config_bridge_listener 监听 ConfigChangedEvent，
+收到事件后从 UnifiedLLMService 获取最新配置并更新受影响的环境变量。
+
+Requirements: 6.1, 6.2, 6.3, 6.4
 """
 
+import asyncio
 import os
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger("app.config_bridge")
+
+
+def _run_async(coro):
+    """
+    在同步上下文中运行异步协程。
+
+    优先尝试获取当前运行中的事件循环，
+    如果已在事件循环中（如 FastAPI 请求处理中），
+    则使用线程池避免死锁。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        # 已在事件循环中运行，创建新线程运行协程以避免死锁
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=30)
+    else:
+        # 没有运行中的事件循环，直接创建新的
+        return asyncio.run(coro)
+
+
+def config_bridge_listener(event) -> None:
+    """
+    配置变更事件监听器（同步函数）。
+
+    当 UnifiedLLMService 发布 ConfigChangedEvent 时，此监听器被调用。
+    它从 UnifiedLLMService 获取受影响厂家的最新配置，并更新对应的环境变量。
+
+    Args:
+        event: ConfigChangedEvent 实例，包含 event_type、provider_name 等信息
+
+    Requirements: 3.5, 6.3
+    """
+    try:
+        provider_name = event.provider_name
+        logger.info(
+            "收到配置变更事件: type=%s, provider=%s, fields=%s",
+            event.event_type,
+            provider_name,
+            event.changed_fields,
+        )
+
+        from app.services.unified_llm_service import unified_llm_service
+
+        # 从 UnifiedLLMService 获取最新的厂家配置
+        # _emit_config_changed 是同步调用，需要用 _run_async 包装异步调用
+        provider = _run_async(unified_llm_service.get_provider_config(provider_name))
+
+        env_key = f"{provider_name.upper()}_API_KEY"
+
+        if provider is None:
+            # 厂家不存在或已被删除，清除对应的环境变量
+            if env_key in os.environ:
+                del os.environ[env_key]
+                logger.info("厂家 %s 不可用，已清除环境变量 %s", provider_name, env_key)
+            return
+
+        if event.event_type == "provider_disabled":
+            # 厂家被禁用，清除对应的环境变量
+            if env_key in os.environ:
+                del os.environ[env_key]
+                logger.info("厂家 %s 已禁用，已清除环境变量 %s", provider_name, env_key)
+            return
+
+        # 厂家更新：用最新的 api_key 更新环境变量
+        if provider.api_key and not _is_placeholder_key(provider.api_key):
+            os.environ[env_key] = provider.api_key
+            logger.info(
+                "已更新环境变量 %s (长度: %d)",
+                env_key,
+                len(provider.api_key),
+            )
+        else:
+            logger.debug("厂家 %s 的 API Key 无效，跳过环境变量更新", provider_name)
+
+    except Exception as e:
+        # 监听器异常不应影响主流程，仅记录错误
+        logger.error("配置变更监听器执行失败: %s", e, exc_info=True)
+
+
+def register_config_bridge_listener() -> None:
+    """
+    注册 Config_Bridge 为配置变更事件监听器。
+
+    在系统启动时调用此函数，将 config_bridge_listener 注册到
+    UnifiedLLMService 的事件监听器列表中。
+
+    Requirements: 3.5, 6.3
+    """
+    try:
+        from app.services.unified_llm_service import unified_llm_service
+
+        unified_llm_service.on_config_changed(config_bridge_listener)
+        logger.info("✅ Config_Bridge 已注册为配置变更事件监听器")
+    except Exception as e:
+        logger.error("❌ 注册 Config_Bridge 监听器失败: %s", e, exc_info=True)
+
+
+def _is_placeholder_key(value: Optional[str]) -> bool:
+    """
+    判断 API Key 是否为占位符。
+
+    Args:
+        value: 待检查的 API Key 值
+
+    Returns:
+        True 表示是占位符或无效值，False 表示有效
+    """
+    if not value or not value.strip():
+        return True
+    return value.strip().startswith("your_")
+
+
+def _bridge_llm_providers() -> int:
+    """
+    从 UnifiedLLMService 获取所有启用的厂家配置，将 API Key 写入环境变量。
+
+    不直接读取 Unified_Config_Manager 或 JSON 文件，不维护自己的缓存。
+    每次调用都从 UnifiedLLMService 获取最新数据（由 service 统一管理缓存）。
+
+    Returns:
+        桥接的配置项数量
+
+    Requirements: 6.1, 6.2, 6.4
+    """
+    bridged_count = 0
+
+    try:
+        from app.services.unified_llm_service import unified_llm_service
+
+        # 从 unified_llm_service 获取所有启用的厂家配置
+        providers = _run_async(unified_llm_service.get_all_providers())
+
+        logger.info(f"  📊 从 UnifiedLLMService 获取到 {len(providers)} 个启用的厂家配置")
+
+        for provider in providers:
+            env_key = f"{provider.name.upper()}_API_KEY"
+            existing_env_value = os.getenv(env_key)
+
+            # 检查环境变量是否已存在且有效（不是占位符）
+            if existing_env_value and not _is_placeholder_key(existing_env_value):
+                logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
+                bridged_count += 1
+            elif provider.api_key and not _is_placeholder_key(provider.api_key):
+                # 只有当环境变量不存在或为占位符时，才使用数据库配置
+                os.environ[env_key] = provider.api_key
+                logger.info(f"  ✓ 使用 UnifiedLLMService 的 {env_key} (长度: {len(provider.api_key)})")
+                bridged_count += 1
+            else:
+                logger.debug(f"  ⏭️  {env_key} 未配置有效的 API Key")
+
+    except Exception as e:
+        logger.error(f"❌ 从 UnifiedLLMService 获取厂家配置失败: {e}", exc_info=True)
+
+    return bridged_count
 
 
 def bridge_config_to_env():
@@ -17,17 +186,18 @@ def bridge_config_to_env():
     将统一配置桥接到环境变量
 
     这个函数会：
-    1. 从数据库读取大模型厂家配置（API 密钥、超时、温度等）
-    2. 将配置写入环境变量
-    3. 将默认模型写入环境变量
-    4. 将数据源配置写入环境变量（API 密钥、超时、重试等）
-    5. 将系统运行时配置写入环境变量
+    1. 从 UnifiedLLMService 获取大模型厂家配置（API 密钥），写入环境变量
+    2. 将默认模型写入环境变量
+    3. 将数据源配置写入环境变量（API 密钥、超时、重试等）
+    4. 将系统运行时配置写入环境变量
 
-    这样 TradingAgents 核心库就能通过环境变量读取到用户配置的数据
+    LLM 配置部分仅从 UnifiedLLMService 获取，不直接读取 Unified_Config_Manager 或 JSON 文件。
+    Config_Bridge 不维护自己的缓存，由 UnifiedLLMService 统一管理缓存。
+
+    Requirements: 6.1, 6.2, 6.4
     """
     try:
         from app.core.unified_config import unified_config
-        from app.services.config_service import config_service
 
         logger.info("🔧 开始桥接配置到环境变量...")
         bridged_count = 0
@@ -57,74 +227,9 @@ def bridge_config_to_env():
         bridged_count += 1
 
         # 1. 桥接大模型配置（基础 API 密钥）
-        # 🔧 [优先级] .env 文件 > 数据库厂家配置
-        # 🔥 修改：从数据库的 llm_providers 集合读取厂家配置，而不是从 JSON 文件
-        # 只有当环境变量不存在或为占位符时，才使用数据库中的配置
-        try:
-            # 使用同步 MongoDB 客户端读取厂家配置
-            from pymongo import MongoClient
-            from app.core.config import settings
-            from app.models.config import LLMProvider
-
-            # 创建同步 MongoDB 客户端
-            client = MongoClient(settings.MONGO_URI)
-            db = client[settings.MONGO_DB]
-            providers_collection = db.llm_providers
-
-            # 查询所有厂家配置
-            providers_data = list(providers_collection.find())
-            providers = [LLMProvider(**data) for data in providers_data]
-
-            logger.info(f"  📊 从数据库读取到 {len(providers)} 个厂家配置")
-
-            for provider in providers:
-                if not provider.is_active:
-                    logger.debug(f"  ⏭️  厂家 {provider.name} 未启用，跳过")
-                    continue
-
-                env_key = f"{provider.name.upper()}_API_KEY"
-                existing_env_value = os.getenv(env_key)
-
-                # 检查环境变量是否已存在且有效（不是占位符）
-                if existing_env_value and not existing_env_value.startswith("your_"):
-                    logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
-                    bridged_count += 1
-                elif provider.api_key and not provider.api_key.startswith("your_"):
-                    # 只有当环境变量不存在或为占位符时，才使用数据库配置
-                    os.environ[env_key] = provider.api_key
-                    logger.info(f"  ✓ 使用数据库厂家配置的 {env_key} (长度: {len(provider.api_key)})")
-                    bridged_count += 1
-                else:
-                    logger.debug(f"  ⏭️  {env_key} 未配置有效的 API Key")
-
-            # 关闭同步客户端
-            client.close()
-
-        except Exception as e:
-            logger.error(f"❌ 从数据库读取厂家配置失败: {e}", exc_info=True)
-            logger.warning("⚠️  将尝试从 JSON 文件读取配置作为后备方案")
-
-            # 后备方案：从 JSON 文件读取
-            llm_configs = unified_config.get_llm_configs()
-            for llm_config in llm_configs:
-                # provider 现在是字符串类型，不再是枚举
-                env_key = f"{llm_config.provider.upper()}_API_KEY"
-                existing_env_value = os.getenv(env_key)
-
-                # 检查环境变量是否已存在且有效（不是占位符）
-                if existing_env_value and not existing_env_value.startswith("your_"):
-                    logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
-                    bridged_count += 1
-                elif llm_config.enabled and llm_config.api_key:
-                    # 只有当环境变量不存在或为占位符时，才使用数据库配置
-                    if not llm_config.api_key.startswith("your_"):
-                        os.environ[env_key] = llm_config.api_key
-                        logger.info(f"  ✓ 使用 JSON 文件中的 {env_key} (长度: {len(llm_config.api_key)})")
-                        bridged_count += 1
-                    else:
-                        logger.warning(f"  ⚠️  {env_key} 在 .env 和 JSON 文件中都是占位符，跳过")
-                else:
-                    logger.debug(f"  ⏭️  {env_key} 未配置")
+        # 从 UnifiedLLMService 获取所有启用的厂家配置，写入环境变量
+        # Requirements: 6.1, 6.2, 6.4
+        bridged_count += _bridge_llm_providers()
 
         # 2. 桥接默认模型配置
         default_model = unified_config.get_default_model()
@@ -737,5 +842,7 @@ __all__ = [
     'clear_bridged_config',
     'reload_bridged_config',
     'sync_pricing_config_now',
+    'config_bridge_listener',
+    'register_config_bridge_listener',
 ]
 

@@ -165,6 +165,16 @@ class OpenAICompatibleBase(ChatOpenAI):
         
         # 记录开始时间
         start_time = time.time()
+
+        # 🔧 DeepSeek reasoning 模型兼容：清理消息中的 reasoning_content
+        cleaned_messages = []
+        for msg in messages:
+            if isinstance(msg, AIMessage) and hasattr(msg, 'additional_kwargs'):
+                if 'reasoning_content' in msg.additional_kwargs:
+                    new_kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != 'reasoning_content'}
+                    msg = AIMessage(content=msg.content, additional_kwargs=new_kwargs)
+            cleaned_messages.append(msg)
+        messages = cleaned_messages
         
         # 调用父类生成方法
         result = super()._generate(messages, stop, run_manager, **kwargs)

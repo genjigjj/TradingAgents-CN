@@ -148,11 +148,44 @@ async def get_task_status_new(
                 if start_time:
                     elapsed_time = (current_time - start_time).total_seconds()
 
+                # 尝试从 Redis 进度数据中获取更详细的步骤信息
+                step_detail = ""
+                try:
+                    from app.services.redis_progress_tracker import get_progress_by_id
+                    redis_progress = get_progress_by_id(task_id)
+                    if redis_progress:
+                        step_detail = redis_progress.get("last_message", "")
+                        # 使用 Redis 中更精确的进度百分比
+                        redis_pct = redis_progress.get("progress_percentage")
+                        if redis_pct is not None:
+                            progress = redis_pct
+                        # 同步 Redis 中的终态状态（completed/failed）
+                        # Redis 进度跟踪器可能比 MongoDB 更快反映最终状态
+                        redis_completed = redis_progress.get("completed", False)
+                        redis_failed = redis_progress.get("failed", False)
+                        if redis_completed and status != "completed":
+                            status = "completed"
+                        elif redis_failed and status != "failed":
+                            status = "failed"
+                except Exception:
+                    pass
+
+                # 根据状态生成友好的消息
+                status_messages = {
+                    "pending": "任务排队中...",
+                    "processing": step_detail or "分析中...",
+                    "running": step_detail or "分析中...",
+                    "completed": "分析完成",
+                    "failed": task_result.get("last_error", "分析失败"),
+                }
+                message = status_messages.get(status, f"任务{status}中...")
+
                 status_data = {
                     "task_id": task_id,
                     "status": status,
                     "progress": progress,
-                    "message": f"任务{status}中...",
+                    "message": message,
+                    "step_detail": step_detail or message,
                     "current_step": status,
                     "start_time": start_time,
                     "end_time": task_result.get("completed_at"),
@@ -162,6 +195,7 @@ async def get_task_status_new(
                     "symbol": task_result.get("symbol") or task_result.get("stock_code"),
                     "stock_code": task_result.get("symbol") or task_result.get("stock_code"),  # 兼容字段
                     "stock_symbol": task_result.get("symbol") or task_result.get("stock_code"),
+                    "error_message": task_result.get("last_error"),
                     "source": "mongodb_tasks"  # 标记数据来源
                 }
 
@@ -209,7 +243,43 @@ async def get_task_status_new(
                     "message": "任务状态获取成功（从历史记录恢复）"
                 }
             else:
-                logger.warning(f"❌ [STATUS] MongoDB中也未找到: {task_id} trace={task_id}")
+                # MongoDB 中也没找到，尝试从 Redis 进度跟踪器查询
+                # （主力选股、龙虎榜等通过 QueueService 入队的任务，进度存储在 Redis progress:{task_id} 中）
+                logger.info(f"📊 [STATUS] MongoDB中未找到，尝试从Redis进度跟踪器查找: {task_id}")
+                try:
+                    from app.services.progress.tracker import get_progress_by_id
+                    redis_progress = get_progress_by_id(task_id)
+                    if redis_progress:
+                        logger.info(f"✅ [STATUS] 从Redis进度跟踪器找到任务: {task_id}")
+                        status = redis_progress.get("status", "processing")
+                        progress_pct = redis_progress.get("progress_percentage", 0)
+                        last_message = redis_progress.get("last_message", "分析中...")
+
+                        status_data = {
+                            "task_id": task_id,
+                            "status": status,
+                            "progress": progress_pct,
+                            "message": last_message,
+                            "current_step": last_message,
+                            "step_detail": last_message,
+                            "start_time": redis_progress.get("start_time"),
+                            "end_time": redis_progress.get("end_time"),
+                            "elapsed_time": redis_progress.get("elapsed_time", 0),
+                            "remaining_time": redis_progress.get("remaining_time", 0),
+                            "estimated_total_time": redis_progress.get("estimated_total_time", 0),
+                            "error_message": redis_progress.get("error_message") or redis_progress.get("failed_reason"),
+                            "source": "redis_progress",
+                        }
+
+                        return {
+                            "success": True,
+                            "data": status_data,
+                            "message": "任务状态获取成功（从Redis进度跟踪器）"
+                        }
+                except Exception as redis_err:
+                    logger.debug(f"📊 [STATUS] Redis进度查询失败: {redis_err}")
+
+                logger.warning(f"❌ [STATUS] 所有数据源均未找到: {task_id} trace={task_id}")
                 raise HTTPException(status_code=404, detail="任务不存在")
 
     except HTTPException:
@@ -271,72 +341,136 @@ async def get_task_result(
             if mongo_result:
                 logger.info(f"✅ [RESULT] 从MongoDB找到结果: {task_id}")
 
-                # 直接使用MongoDB中的数据结构（与web目录保持一致）
-                result_data = {
-                    "analysis_id": mongo_result.get("analysis_id"),
-                    "stock_symbol": mongo_result.get("stock_symbol"),
-                    "stock_code": mongo_result.get("stock_symbol"),  # 兼容性
-                    "analysis_date": mongo_result.get("analysis_date"),
-                    "summary": mongo_result.get("summary", ""),
-                    "recommendation": mongo_result.get("recommendation", ""),
-                    "confidence_score": mongo_result.get("confidence_score", 0.0),
-                    "risk_level": mongo_result.get("risk_level", "中等"),
-                    "key_points": mongo_result.get("key_points", []),
-                    "execution_time": mongo_result.get("execution_time", 0),
-                    "tokens_used": mongo_result.get("tokens_used", 0),
-                    "analysts": mongo_result.get("analysts", []),
-                    "research_depth": mongo_result.get("research_depth", "快速"),
-                    "reports": mongo_result.get("reports", {}),
-                    "created_at": mongo_result.get("created_at"),
-                    "updated_at": mongo_result.get("updated_at"),
-                    "status": mongo_result.get("status", "completed"),
-                    "decision": mongo_result.get("decision", {}),
-                    "source": "mongodb"  # 标记数据来源
-                }
-
-                # 添加调试信息
-                logger.info(f"📊 [RESULT] MongoDB数据结构: {list(result_data.keys())}")
-                logger.info(f"📊 [RESULT] MongoDB summary长度: {len(result_data['summary'])}")
-                logger.info(f"📊 [RESULT] MongoDB recommendation长度: {len(result_data['recommendation'])}")
-                logger.info(f"📊 [RESULT] MongoDB decision字段: {bool(result_data.get('decision'))}")
-                if result_data.get('decision'):
-                    decision = result_data['decision']
-                    logger.info(f"📊 [RESULT] MongoDB decision内容: action={decision.get('action')}, target_price={decision.get('target_price')}, confidence={decision.get('confidence')}")
+                # 检查是否是主力选股报告
+                task_type = mongo_result.get("task_type", "")
+                if task_type == "main_force_overview":
+                    # 主力选股报告：返回 overview_analysis 结构
+                    overview = mongo_result.get("reports", {})
+                    # 将综合研究员的 JSON 响应转换为可读 Markdown
+                    if "comprehensive_researcher" in overview and isinstance(overview["comprehensive_researcher"], str):
+                        from app.routers.reports import _format_comprehensive_researcher_report
+                        overview = dict(overview)
+                        overview["comprehensive_researcher"] = _format_comprehensive_researcher_report(
+                            overview["comprehensive_researcher"],
+                            []
+                        )
+                    result_data = {
+                        "overview_analysis": overview,
+                        "recommended_stocks": mongo_result.get("recommended_stocks", []),
+                        "success": True,
+                        "task_id": task_id,
+                        "created_at": mongo_result.get("created_at"),
+                        "completed_at": mongo_result.get("updated_at"),
+                        "source": "analysis_reports_main_force",
+                    }
+                elif task_type == "longhubang_analysis":
+                    # 龙虎榜报告：将 reports 映射为 agents_analysis 结构
+                    reports = mongo_result.get("reports", {})
+                    agents_analysis = {}
+                    for key, content in reports.items():
+                        agents_analysis[key] = {"agent_name": key, "analysis": content}
+                    result_data = {
+                        "agents_analysis": agents_analysis,
+                        "recommended_stocks": mongo_result.get("recommended_stocks", []),
+                        "success": True,
+                        "task_id": task_id,
+                        "created_at": mongo_result.get("created_at"),
+                        "completed_at": mongo_result.get("updated_at"),
+                        "source": "analysis_reports_longhubang",
+                    }
+                else:
+                    # 单股分析：按原有格式构建
+                    result_data = {
+                        "analysis_id": mongo_result.get("analysis_id"),
+                        "stock_symbol": mongo_result.get("stock_symbol"),
+                        "stock_code": mongo_result.get("stock_symbol"),
+                        "analysis_date": mongo_result.get("analysis_date"),
+                        "summary": mongo_result.get("summary", ""),
+                        "recommendation": mongo_result.get("recommendation", ""),
+                        "confidence_score": mongo_result.get("confidence_score", 0.0),
+                        "risk_level": mongo_result.get("risk_level", "中等"),
+                        "key_points": mongo_result.get("key_points", []),
+                        "execution_time": mongo_result.get("execution_time", 0),
+                        "tokens_used": mongo_result.get("tokens_used", 0),
+                        "analysts": mongo_result.get("analysts", []),
+                        "research_depth": mongo_result.get("research_depth", "快速"),
+                        "reports": mongo_result.get("reports", {}),
+                        "created_at": mongo_result.get("created_at"),
+                        "updated_at": mongo_result.get("updated_at"),
+                        "status": mongo_result.get("status", "completed"),
+                        "decision": mongo_result.get("decision", {}),
+                        "source": "mongodb"
+                    }
             else:
                 # 兜底：analysis_tasks 集合中的 result 字段
                 tasks_doc = await db.analysis_tasks.find_one(
                     {"task_id": task_id},
-                    {"result": 1, "symbol": 1, "stock_code": 1, "created_at": 1, "completed_at": 1}
+                    {"result": 1, "symbol": 1, "stock_code": 1, "task_type": 1, "created_at": 1, "completed_at": 1}
                 )
                 if tasks_doc and tasks_doc.get("result"):
                     r = tasks_doc["result"] or {}
-                    logger.info("✅ [RESULT] 从analysis_tasks.result 找到结果")
-                    # 获取股票代码 (优先使用symbol)
-                    symbol = (tasks_doc.get("symbol") or tasks_doc.get("stock_code") or
-                             r.get("stock_symbol") or r.get("stock_code"))
-                    result_data = {
-                        "analysis_id": r.get("analysis_id"),
-                        "stock_symbol": symbol,
-                        "stock_code": symbol,  # 兼容字段
-                        "analysis_date": r.get("analysis_date"),
-                        "summary": r.get("summary", ""),
-                        "recommendation": r.get("recommendation", ""),
-                        "confidence_score": r.get("confidence_score", 0.0),
-                        "risk_level": r.get("risk_level", "中等"),
-                        "key_points": r.get("key_points", []),
-                        "execution_time": r.get("execution_time", 0),
-                        "tokens_used": r.get("tokens_used", 0),
-                        "analysts": r.get("analysts", []),
-                        "research_depth": r.get("research_depth", "快速"),
-                        "reports": r.get("reports", {}),
-                        "state": r.get("state", {}),
-                        "detailed_analysis": r.get("detailed_analysis", {}),
-                        "created_at": tasks_doc.get("created_at"),
-                        "updated_at": tasks_doc.get("completed_at"),
-                        "status": r.get("status", "completed"),
-                        "decision": r.get("decision", {}),
-                        "source": "analysis_tasks"  # 数据来源标记
-                    }
+                    task_type = tasks_doc.get("task_type", "stock_analysis")
+                    logger.info(f"✅ [RESULT] 从analysis_tasks.result 找到结果 (task_type={task_type})")
+
+                    # 主力选股整体分析：直接返回原始 result 结构
+                    if task_type == "main_force_overview":
+                        overview = r.get("overview_analysis", {})
+                        # 将综合研究员的 JSON 响应转换为可读 Markdown
+                        if "comprehensive_researcher" in overview and isinstance(overview["comprehensive_researcher"], str):
+                            from app.routers.reports import _format_comprehensive_researcher_report
+                            overview = dict(overview)  # 避免修改原始数据
+                            overview["comprehensive_researcher"] = _format_comprehensive_researcher_report(
+                                overview["comprehensive_researcher"],
+                                r.get("recommended_stocks", [])
+                            )
+                        result_data = {
+                            "overview_analysis": overview,
+                            "recommended_stocks": r.get("recommended_stocks", []),
+                            "success": r.get("success", True),
+                            "task_id": task_id,
+                            "created_at": tasks_doc.get("created_at"),
+                            "completed_at": tasks_doc.get("completed_at"),
+                            "source": "analysis_tasks",
+                        }
+                    elif task_type == "longhubang_analysis":
+                        # 龙虎榜分析：直接返回原始 result 结构
+                        result_data = {
+                            "agents_analysis": r.get("agents_analysis", {}),
+                            "recommended_stocks": r.get("recommended_stocks", []),
+                            "success": r.get("success", True),
+                            "task_id": task_id,
+                            "created_at": tasks_doc.get("created_at"),
+                            "completed_at": tasks_doc.get("completed_at"),
+                            "source": "analysis_tasks",
+                        }
+                    else:
+                        # 单股分析等其他类型：按原有格式包装
+                        # 获取股票代码 (优先使用symbol)
+                        symbol = (tasks_doc.get("symbol") or tasks_doc.get("stock_code") or
+                                 r.get("stock_symbol") or r.get("stock_code"))
+                        result_data = {
+                            "analysis_id": r.get("analysis_id"),
+                            "stock_symbol": symbol,
+                            "stock_code": symbol,  # 兼容字段
+                            "analysis_date": r.get("analysis_date"),
+                            "summary": r.get("summary", ""),
+                            "recommendation": r.get("recommendation", ""),
+                            "confidence_score": r.get("confidence_score", 0.0),
+                            "risk_level": r.get("risk_level", "中等"),
+                            "key_points": r.get("key_points", []),
+                            "execution_time": r.get("execution_time", 0),
+                            "tokens_used": r.get("tokens_used", 0),
+                            "analysts": r.get("analysts", []),
+                            "research_depth": r.get("research_depth", "快速"),
+                            "reports": r.get("reports", {}),
+                            "state": r.get("state", {}),
+                            "detailed_analysis": r.get("detailed_analysis", {}),
+                            "created_at": tasks_doc.get("created_at"),
+                            "updated_at": tasks_doc.get("completed_at"),
+                            "status": r.get("status", "completed"),
+                            "decision": r.get("decision", {}),
+                            "source": "analysis_tasks"  # 数据来源标记
+                        }
 
         if not result_data:
             logger.warning(f"❌ [RESULT] 所有数据源都未找到结果: {task_id}")
@@ -641,7 +775,18 @@ async def get_task_result(
         if result_data.get('decision'):
             logger.info(f"🔍 [FINAL] decision内容: {result_data['decision']}")
 
-        # 构建严格验证的结果数据
+        # 主力选股/龙虎榜分析：直接返回原始结构，不做单股分析格式化
+        if result_data.get("source") in ("analysis_tasks", "analysis_reports_main_force", "analysis_reports_longhubang") and (
+            result_data.get("overview_analysis") is not None or result_data.get("agents_analysis") is not None
+        ):
+            logger.info(f"✅ [RESULT] 非单股分析结果，直接返回: {task_id}")
+            return {
+                "success": True,
+                "data": result_data,
+                "message": "分析结果获取成功"
+            }
+
+        # 构建严格验证的结果数据（单股分析格式）
         final_result_data = {
             "analysis_id": safe_string(result_data.get("analysis_id"), "unknown"),
             "stock_symbol": safe_string(result_data.get("stock_symbol"), "UNKNOWN"),

@@ -91,6 +91,50 @@ const routes: RouteRecordRaw[] = [
       }
     ]
   },
+  {
+    path: '/main-force',
+    name: 'MainForce',
+    component: () => import('@/layouts/BasicLayout.vue'),
+    meta: {
+      title: '主力选股',
+      icon: 'TrendCharts',
+      requiresAuth: true,
+      transition: 'slide-up'
+    },
+    children: [
+      {
+        path: '',
+        name: 'MainForceHome',
+        component: () => import('@/views/MainForce/index.vue'),
+        meta: {
+          title: '主力选股',
+          requiresAuth: true
+        }
+      }
+    ]
+  },
+  {
+    path: '/longhubang',
+    name: 'Longhubang',
+    component: () => import('@/layouts/BasicLayout.vue'),
+    meta: {
+      title: '龙虎榜',
+      icon: 'DataAnalysis',
+      requiresAuth: true,
+      transition: 'slide-up'
+    },
+    children: [
+      {
+        path: '',
+        name: 'LonghubangHome',
+        component: () => import('@/views/Longhubang/index.vue'),
+        meta: {
+          title: '龙虎榜',
+          requiresAuth: true
+        }
+      }
+    ]
+  },
 
   {
     path: '/favorites',

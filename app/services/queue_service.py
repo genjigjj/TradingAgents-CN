@@ -56,9 +56,21 @@ class QueueService:
         user_id: str,
         symbol: str,
         params: Dict[str, Any],
-        batch_id: Optional[str] = None
+        batch_id: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> str:
-        """任务入队，支持并发控制（开源版FIFO队列）"""
+        """任务入队，支持并发控制（开源版FIFO队列）。
+
+        params 字典会被完整序列化存储到 Redis，出队时反序列化为
+        task_data["parameters"]。调用方可在 params 中携带 ``task_type``
+        字段以区分任务类型（stock_analysis / main_force_overview /
+        main_force_batch / longhubang_analysis），AnalysisWorker 将
+        根据该字段路由到对应的服务执行方法。
+
+        Args:
+            task_id: 可选，由调用方预先生成的任务 ID。
+                     如果不传则自动生成 UUID。
+        """
 
         # 检查用户并发限制
         if not await self._check_user_concurrent_limit(user_id):
@@ -68,7 +80,9 @@ class QueueService:
         if not await self._check_global_concurrent_limit():
             raise ValueError(f"系统达到全局并发限制 ({self.global_concurrent_limit})")
 
-        task_id = str(uuid.uuid4())
+        # 使用调用方传入的 task_id，或自动生成
+        if task_id is None:
+            task_id = str(uuid.uuid4())
         key = TASK_PREFIX + task_id
         now = int(time.time())
 

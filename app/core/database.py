@@ -362,6 +362,25 @@ async def create_database_indexes(db):
         await market_quotes.create_index([("amount", -1)])
         await market_quotes.create_index([("updated_at", -1)])
 
+        # longhubang_records 的索引
+        longhubang_records = db["longhubang_records"]
+        await longhubang_records.create_index(
+            [("date", 1), ("stock_code", 1), ("youzi_name", 1), ("yingye_bu", 1)],
+            unique=True
+        )
+        await longhubang_records.create_index([("date", -1)])
+        await longhubang_records.create_index([("stock_code", 1)])
+        await longhubang_records.create_index([("net_inflow", -1)])
+
+        # longhubang_analysis 的索引
+        longhubang_analysis = db["longhubang_analysis"]
+        await longhubang_analysis.create_index([("created_at", -1)])
+
+        # main_force_batch_history 的索引
+        main_force_batch_history = db["main_force_batch_history"]
+        await main_force_batch_history.create_index([("analysis_date", -1)])
+        await main_force_batch_history.create_index([("created_at", -1)])
+
         logger.info("✅ 数据库索引创建完成")
 
     except Exception as e:

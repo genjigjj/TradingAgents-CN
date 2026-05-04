@@ -122,6 +122,20 @@ class ChatDeepSeek(ChatOpenAI):
         session_id = kwargs.pop('session_id', None)
         analysis_type = kwargs.pop('analysis_type', None)
 
+        # 🔧 DeepSeek reasoning 模型兼容：清理消息中的 reasoning_content
+        # DeepSeek-R1 等推理模型会在 assistant 消息中返回 reasoning_content 字段，
+        # 多轮对话时如果不正确回传会导致 400 错误。
+        # 这里将 reasoning_content 从 additional_kwargs 中移除，避免冲突。
+        cleaned_messages = []
+        for msg in messages:
+            if isinstance(msg, AIMessage) and hasattr(msg, 'additional_kwargs'):
+                if 'reasoning_content' in msg.additional_kwargs:
+                    # 复制消息并移除 reasoning_content
+                    new_kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != 'reasoning_content'}
+                    msg = AIMessage(content=msg.content, additional_kwargs=new_kwargs)
+            cleaned_messages.append(msg)
+        messages = cleaned_messages
+
         try:
             # 调用父类方法生成响应
             result = super()._generate(messages, stop, run_manager, **kwargs)

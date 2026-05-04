@@ -4,7 +4,9 @@
 """
 
 import json
+import logging
 import os
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
@@ -15,6 +17,8 @@ from app.models.config import (
     LLMConfig, DataSourceConfig, DatabaseConfig, SystemConfig,
     ModelProvider, DataSourceType, DatabaseType
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,16 +99,106 @@ class UnifiedConfigManager:
         return self._load_json_file(self.paths.models_json, "models")
     
     def get_llm_configs(self) -> List[LLMConfig]:
-        """获取标准化的LLM配置"""
+        """
+        获取标准化的LLM配置。
+
+        已弃用：请使用 unified_llm_service.get_available_models() 替代。
+        此方法内部委托给 UnifiedLLMService，确保返回结果与新服务一致。
+
+        Returns:
+            List[LLMConfig]: 所有已启用且可用的 LLM 模型配置列表
+
+        Requirements: 7.1, 7.2, 7.3
+        """
+        warnings.warn(
+            "get_llm_configs() 已弃用，请使用 unified_llm_service",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        try:
+            from app.services.unified_llm_service import unified_llm_service
+
+            # unified_llm_service.get_available_models() 是 async 方法，
+            # 需要处理 sync/async 兼容性
+            merged_models = self._run_async(
+                unified_llm_service.get_available_models()
+            )
+
+            # 将 MergedModelConfig 转换为 LLMConfig 以保持向后兼容
+            llm_configs = []
+            for merged in merged_models:
+                try:
+                    llm_config = LLMConfig(
+                        provider=merged.provider_name,
+                        model_name=merged.model_name,
+                        model_display_name=merged.model_display_name,
+                        api_key=merged.api_key,
+                        api_base=merged.api_base,
+                        max_tokens=merged.max_tokens,
+                        temperature=merged.temperature,
+                        timeout=merged.timeout,
+                        retry_times=merged.retry_times,
+                        enabled=merged.enabled,
+                        capability_level=merged.capability_level,
+                        suitable_roles=merged.suitable_roles,
+                        features=merged.features,
+                        input_price_per_1k=merged.input_price_per_1k,
+                        output_price_per_1k=merged.output_price_per_1k,
+                        currency=merged.currency,
+                    )
+                    llm_configs.append(llm_config)
+                except Exception as e:
+                    logger.warning("MergedModelConfig 转换为 LLMConfig 失败: %s", e)
+                    continue
+
+            return llm_configs
+
+        except Exception as e:
+            logger.warning(
+                "委托 unified_llm_service 失败，回退到旧逻辑: %s", e
+            )
+            # 回退到旧的 JSON 文件读取逻辑
+            return self._get_llm_configs_legacy()
+    
+    @staticmethod
+    def _run_async(coro):
+        """
+        在同步上下文中运行异步协程。
+
+        优先尝试获取当前运行中的事件循环并使用 run_until_complete，
+        如果没有运行中的事件循环则创建新的。
+        如果当前已在事件循环中（如 FastAPI 请求处理中），
+        则使用 asyncio.ensure_future + 同步等待的方式。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # 已在事件循环中运行（如 FastAPI 请求处理中）
+            # 创建新线程运行协程以避免死锁
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result(timeout=30)
+        else:
+            # 没有运行中的事件循环，直接创建新的
+            return asyncio.run(coro)
+
+    def _get_llm_configs_legacy(self) -> List[LLMConfig]:
+        """
+        旧的 LLM 配置读取逻辑（从 JSON 文件读取）。
+
+        作为 unified_llm_service 不可用时的回退方案。
+        """
         legacy_models = self.get_legacy_models()
         llm_configs = []
 
         for model in legacy_models:
             try:
-                # 直接使用 provider 字符串，不再映射到枚举
                 provider = model.get("provider", "openai")
-
-                # 方案A：敏感密钥不从文件加载，统一走环境变量/厂家目录
                 llm_config = LLMConfig(
                     provider=provider,
                     model_name=model.get("model_name", ""),
@@ -117,11 +211,11 @@ class UnifiedConfigManager:
                 )
                 llm_configs.append(llm_config)
             except Exception as e:
-                print(f"转换模型配置失败: {model}, 错误: {e}")
+                logger.warning("转换模型配置失败: %s, 错误: %s", model, e)
                 continue
 
         return llm_configs
-    
+
     def save_llm_config(self, llm_config: LLMConfig) -> bool:
         """保存LLM配置到传统格式"""
         try:
@@ -224,10 +318,54 @@ class UnifiedConfigManager:
             return False
     
     def get_default_model(self) -> str:
-        """获取默认模型（向后兼容）"""
+        """
+        获取默认模型（向后兼容）。
+
+        已弃用：请使用 unified_llm_service.get_default_model() 替代。
+        此方法内部委托给 UnifiedLLMService，返回默认模型名称字符串。
+
+        Returns:
+            str: 默认模型名称
+
+        Requirements: 7.1, 7.2, 7.3
+        """
+        warnings.warn(
+            "get_default_model() 已弃用，请使用 unified_llm_service",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        try:
+            from app.services.unified_llm_service import unified_llm_service
+
+            merged = self._run_async(
+                unified_llm_service.get_default_model()
+            )
+
+            if merged is not None:
+                return merged.model_name
+
+            # unified_llm_service 返回 None，回退到旧逻辑
+            logger.warning("unified_llm_service.get_default_model() 返回 None，回退到旧逻辑")
+            return self._get_default_model_legacy()
+
+        except Exception as e:
+            logger.warning(
+                "委托 unified_llm_service.get_default_model() 失败，回退到旧逻辑: %s", e
+            )
+            return self._get_default_model_legacy()
+
+    def _get_default_model_legacy(self) -> str:
+        """
+        旧的默认模型获取逻辑（从 JSON 文件读取）。
+
+        作为 unified_llm_service 不可用时的回退方案。
+        """
         settings = self.get_system_settings()
-        # 优先返回快速分析模型，保持向后兼容
-        return settings.get("quick_analysis_model", settings.get("default_model", "qwen-turbo"))
+        return settings.get(
+            "quick_analysis_model",
+            settings.get("default_model", "qwen-turbo"),
+        )
 
     def set_default_model(self, model_name: str) -> bool:
         """设置默认模型（向后兼容）"""

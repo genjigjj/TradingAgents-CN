@@ -2,6 +2,7 @@
 系统配置相关数据模型
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from app.utils.timezone import now_tz
 from typing import Optional, Dict, Any, List
@@ -485,3 +486,64 @@ class ConfigTestResponse(BaseModel):
     message: str
     details: Optional[Dict[str, Any]] = None
     response_time: Optional[float] = None
+
+
+# ============================================================
+# 统一 LLM 配置管理体系 - 新增数据模型
+# ============================================================
+
+
+@dataclass
+class MergedModelConfig:
+    """
+    合并后的模型配置（运行时使用，不持久化）
+
+    将 LLMConfig（模型参数）和 LLMProvider（厂家信息）合并为一个完整的运行时配置对象。
+    所有功能模块通过 UnifiedLLMService 获取此对象，无需自行合并配置。
+
+    合并规则：
+    - api_key: 始终从 LLMProvider 获取
+    - api_base: 优先 LLMConfig.api_base，回退 LLMProvider.default_base_url
+    - enabled: 需要 LLMConfig.enabled AND LLMProvider.is_active 都为 True
+    - 其余模型参数（max_tokens、temperature 等）来自 LLMConfig
+    """
+
+    # 来自 LLMConfig 的模型参数
+    model_name: str
+    model_display_name: Optional[str] = None
+    max_tokens: int = 4000
+    temperature: float = 0.7
+    timeout: int = 180
+    retry_times: int = 3
+    enabled: bool = True
+    capability_level: int = 2
+    suitable_roles: List[str] = field(default_factory=lambda: ["both"])
+    features: List[str] = field(default_factory=list)
+
+    # 来自 LLMProvider 的厂家信息（动态合并）
+    provider_name: str = ""
+    api_key: str = ""                # 始终从 LLMProvider 获取
+    api_base: str = ""               # 优先 LLMConfig.api_base，回退 LLMProvider.default_base_url
+    provider_display_name: str = ""
+    is_aggregator: bool = False
+
+    # 定价信息
+    input_price_per_1k: Optional[float] = None
+    output_price_per_1k: Optional[float] = None
+    currency: str = "CNY"
+
+
+@dataclass
+class ConfigChangedEvent:
+    """
+    配置变更事件
+
+    当 LLM 厂家配置或模型配置发生变更时，UnifiedLLMService 会发布此事件，
+    已注册的监听器（如 Config_Bridge）可据此执行自定义逻辑（如刷新环境变量、重建 LLM 客户端等）。
+    """
+
+    event_type: str                  # "provider_updated" | "provider_disabled" | "model_updated"
+    provider_name: str               # 受影响的厂家名称
+    changed_fields: List[str] = field(default_factory=list)  # 变更的字段列表
+    timestamp: datetime = field(default_factory=now_tz)
+    sync_result: Optional[dict] = None  # 同步结果

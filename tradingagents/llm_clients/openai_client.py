@@ -72,6 +72,13 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        # DeepSeek 推理模型（deepseek-reasoner, deepseek-v4-pro 等）默认开启 thinking mode，
+        # 但 LangChain 不支持 reasoning_content 协议，tool calls 时会导致 400 错误。
+        # 通过 model_kwargs 传递 extra_body 禁用 thinking mode。
+        if self.provider == "deepseek":
+            llm_kwargs.setdefault("model_kwargs", {})
+            llm_kwargs["model_kwargs"]["extra_body"] = {"thinking": {"type": "disabled"}}
+
         return NormalizedChatOpenAI(**llm_kwargs)
 
     def validate_model(self) -> bool:
