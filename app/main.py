@@ -69,6 +69,9 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from app.services.quotes_ingestion_service import QuotesIngestionService
 from app.routers import paper as paper_router
+from app.routers import portfolio as portfolio_router
+from app.routers import smart_monitor as smart_monitor_router
+from app.routers import stock_monitor as stock_monitor_router
 
 
 def get_version() -> str:
@@ -228,6 +231,13 @@ async def lifespan(app: FastAPI):
         raise
 
     await init_db()
+
+    # 持仓分析/AI盯盘/实时监测集合索引初始化（Requirements: 7.1-7.5）
+    try:
+        from app.scripts.init_portfolio_monitor_collections import ensure_indexes
+        await ensure_indexes()
+    except Exception as e:
+        logger.warning(f"⚠️  持仓监测集合索引初始化失败（不影响系统启动）: {e}")
 
     # 数据迁移：将旧配置体系数据迁移到 llm_providers 集合（Requirements: 1.3, 7.4）
     # 迁移必须在 bridge_config_to_env 之前执行，确保环境变量桥接时能读取到最新的厂家数据
@@ -594,6 +604,50 @@ async def lifespan(app: FastAPI):
         else:
             logger.info(f"📰 新闻数据同步已配置（仅自选股）: {settings.NEWS_SYNC_CRON}")
 
+        # AI 盯盘定时任务（SmartMonitorService.trigger_check）
+        logger.info("🔄 配置 AI 盯盘定时任务...")
+
+        from app.services.smart_monitor_service import SmartMonitorService
+
+        _smart_monitor_service = SmartMonitorService()
+
+        async def _run_smart_monitor_check():
+            """AI 盯盘定时检查（内部 try-except 包裹，单个任务失败不影响其他任务）"""
+            try:
+                await _smart_monitor_service.trigger_check()
+            except Exception as exc:
+                logger.error(f"[AI盯盘] 定时检查异常: {exc}", exc_info=True)
+
+        scheduler.add_job(
+            _run_smart_monitor_check,
+            IntervalTrigger(seconds=300, timezone=settings.TIMEZONE),
+            id="smart_monitor_trigger_check",
+            name="AI 盯盘定时检查",
+        )
+        logger.info("⏱ AI 盯盘定时任务已配置: 每 300s 执行一次 trigger_check()")
+
+        # 实时监测定时任务（StockMonitorService.check_all_prices）
+        logger.info("🔄 配置实时监测定时任务...")
+
+        from app.services.stock_monitor_service import StockMonitorService
+
+        _stock_monitor_service = StockMonitorService()
+
+        async def _run_stock_monitor_check():
+            """实时监测价格轮询（内部 try-except 包裹，异常不中断调度器）"""
+            try:
+                await _stock_monitor_service.check_all_prices()
+            except Exception as exc:
+                logger.error(f"[实时监测] 价格轮询异常: {exc}", exc_info=True)
+
+        scheduler.add_job(
+            _run_stock_monitor_check,
+            IntervalTrigger(seconds=60, timezone=settings.TIMEZONE),
+            id="stock_monitor_check_prices",
+            name="实时监测价格轮询",
+        )
+        logger.info("⏱ 实时监测定时任务已配置: 每 60s 执行一次 check_all_prices()")
+
         scheduler.start()
 
         # 设置调度器实例到服务中，以便API可以管理任务
@@ -759,6 +813,11 @@ from app.routers import main_force as main_force_router
 from app.routers import longhubang as longhubang_router
 app.include_router(main_force_router.router, prefix="/api/main-force", tags=["main-force"])
 app.include_router(longhubang_router.router, prefix="/api/longhubang", tags=["longhubang"])
+
+# 持仓分析与 AI 盯盘模块
+app.include_router(portfolio_router.router)
+app.include_router(smart_monitor_router.router)
+app.include_router(stock_monitor_router.router)
 
 
 @app.get("/")

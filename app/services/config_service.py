@@ -3688,17 +3688,21 @@ class ConfigService:
                 "messages": [
                     {"role": "user", "content": "你好，请简单介绍一下你自己。"}
                 ],
-                "max_tokens": 50,
+                "max_tokens": 200,
                 "temperature": 0.1
             }
 
-            response = requests.post(url, json=data, headers=headers, timeout=10)
+            response = requests.post(url, json=data, headers=headers, timeout=30)
 
             if response.status_code == 200:
                 result = response.json()
                 if "choices" in result and len(result["choices"]) > 0:
-                    content = result["choices"][0]["message"]["content"]
-                    if content and len(content.strip()) > 0:
+                    message = result["choices"][0].get("message", {})
+                    content = message.get("content", "")
+                    # DeepSeek V4 等推理模型将思考过程放在 reasoning_content 中
+                    reasoning_content = message.get("reasoning_content", "")
+                    effective_content = content or reasoning_content
+                    if effective_content and len(effective_content.strip()) > 0:
                         return {
                             "success": True,
                             "message": f"{display_name} API连接测试成功"

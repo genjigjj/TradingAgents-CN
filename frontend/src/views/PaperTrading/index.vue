@@ -6,6 +6,7 @@
         <span>模拟交易</span>
       </div>
       <div class="actions">
+        <NotificationPanel />
         <el-button :icon="Refresh" text size="small" @click="refreshAll">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openOrderDialog">下市场单</el-button>
         <el-button type="danger" plain :icon="Delete" @click="confirmReset">重置账户</el-button>
@@ -206,6 +207,19 @@
       </el-col>
     </el-row>
 
+    <!-- 增强功能 Tab 页：持仓分析 / AI 盯盘 / 实时监测 -->
+    <el-tabs v-model="activeFeatureTab" type="border-card" class="feature-tabs">
+      <el-tab-pane label="📊 持仓分析" name="analysis">
+        <PortfolioAnalysis @switch-tab="handleSwitchTab" />
+      </el-tab-pane>
+      <el-tab-pane label="🤖 AI 盯盘" name="smart-monitor">
+        <SmartMonitor />
+      </el-tab-pane>
+      <el-tab-pane label="📡 实时监测" name="monitor">
+        <StockMonitor />
+      </el-tab-pane>
+    </el-tabs>
+
     <el-dialog v-model="orderDialog" title="下市场单" width="480px">
       <!-- 分析上下文提示 -->
       <div v-if="(order as any).analysis_id" class="analysis-context" style="margin-bottom:12px">
@@ -247,6 +261,20 @@
         <el-form-item label="数量">
           <el-input-number v-model="order.qty" :min="1" />
         </el-form-item>
+        <el-form-item label="自定义价格">
+          <el-input-number
+            v-model="order.price"
+            :min="0"
+            :precision="2"
+            :step="0.01"
+            placeholder="留空则使用当前市场价"
+            :controls="false"
+            style="width: 100%"
+          />
+          <div style="font-size: 12px; color: #909399; margin-top: 4px">
+            💡 留空或填 0 则按当前市场价成交；填入价格可录入历史持仓
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="orderDialog=false">取消</el-button>
@@ -265,6 +293,10 @@ import { paperApi } from '@/api/paper'
 import { analysisApi } from '@/api/analysis'
 import { stocksApi } from '@/api/stocks'
 import { formatDateTime } from '@/utils/datetime'
+import NotificationPanel from '@/components/NotificationPanel.vue'
+import PortfolioAnalysis from './PortfolioAnalysis.vue'
+import SmartMonitor from './SmartMonitor.vue'
+import StockMonitor from './StockMonitor.vue'
 
 // 路由与初始化
 const route = useRoute()
@@ -277,9 +309,15 @@ const orders = ref<any[]>([])
 const loading = ref({ account: false, positions: false, orders: false })
 
 const orderDialog = ref(false)
-const order = ref({ side: 'buy', code: '', qty: 100 })
+const order = ref({ side: 'buy', code: '', qty: 100, price: 0 })
 const detectedMarket = ref<string>('')
 const activeMarketTab = ref<string>('CN')
+const activeFeatureTab = ref<string>('analysis')
+
+// 处理子组件切换 Tab 事件（PortfolioAnalysis 同步到监测后跳转）
+function handleSwitchTab(tabName: string) {
+  activeFeatureTab.value = tabName
+}
 
 // 计算属性：根据当前市场标签页过滤持仓
 const filteredPositions = computed(() => {
@@ -435,6 +473,10 @@ async function submitOrder() {
   try {
     const payload: any = { side: order.value.side as 'buy' | 'sell', code: order.value.code, quantity: Number(order.value.qty) }
     if ((order.value as any).analysis_id) payload.analysis_id = (order.value as any).analysis_id
+    // 自定义价格：大于 0 时传给后端
+    if (order.value.price && order.value.price > 0) {
+      payload.price = order.value.price
+    }
     const res = await paperApi.placeOrder(payload)
     if (res.success) {
       ElMessage.success('下单成功')
@@ -593,4 +635,5 @@ onMounted(() => {
 .header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 12px; }
 .title { display:flex; align-items:center; font-weight: 600; font-size: 16px; }
 .card-hd { font-weight: 600; }
+.feature-tabs { margin-top: 16px; }
 </style>

@@ -59,10 +59,12 @@ class WebSocketManager:
                         self.active_connections[task_id].discard(connection)
     
     async def broadcast_to_user(self, user_id: str, message: Dict[str, Any]):
-        """向用户的所有连接广播消息"""
-        # 这里可以扩展为按用户ID管理连接
-        # 目前简化实现，只按任务ID管理
-        pass
+        """向用户的所有连接广播消息（委托给统一通知 WebSocket 管理器）"""
+        try:
+            from app.routers.websocket_notifications import manager as ws_notif_manager
+            await ws_notif_manager.send_personal_message(message, user_id)
+        except Exception as e:
+            logger.warning(f"⚠️ 通过统一 WebSocket 管理器广播失败: {e}")
     
     async def get_connection_count(self, task_id: str) -> int:
         """获取指定任务的连接数"""

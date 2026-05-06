@@ -137,6 +137,7 @@ class AnalysisWorker:
         - ``main_force_overview`` → MainForceService.execute_overview_analysis
         - ``main_force_batch``    → MainForceService.execute_single_deep_analysis
         - ``longhubang_analysis`` → LonghubangService.execute_ai_analysis
+        - ``portfolio_batch``     → PortfolioAnalysisService.execute_batch_analysis
         - 其他 / 未知（含 ``stock_analysis``）→ AnalysisService.execute_analysis_task（向后兼容）
         """
         task_id = task_data.get("id")
@@ -169,6 +170,10 @@ class AnalysisWorker:
             elif task_type == "longhubang_analysis":
                 # 龙虎榜 AI 分析 → LonghubangService
                 await self._handle_longhubang_analysis(task_id, parameters_dict)
+
+            elif task_type == "portfolio_batch":
+                # 持仓批量分析 → PortfolioAnalysisService
+                await self._handle_portfolio_batch(task_id, user_id, parameters_dict)
 
             else:
                 # 向后兼容：默认路由到现有 AnalysisService
@@ -239,6 +244,23 @@ class AnalysisWorker:
             task_id=task_id,
             data_summary=data_summary,
             scoring=scoring,
+        )
+
+    async def _handle_portfolio_batch(
+        self, task_id: str, user_id: str, parameters: Dict[str, Any]
+    ):
+        """处理持仓批量分析任务"""
+        from app.services.portfolio_analysis_service import PortfolioAnalysisService
+
+        service = PortfolioAnalysisService()
+        codes = parameters.get("codes", [])
+        model_name = parameters.get("model_name")
+
+        await service.execute_batch_analysis(
+            task_id=task_id,
+            user_id=user_id,
+            codes=codes,
+            model_name=model_name,
         )
 
     async def _handle_stock_analysis(

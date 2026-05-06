@@ -26,6 +26,7 @@ class PlaceOrderRequest(BaseModel):
     side: Literal["buy", "sell"]
     quantity: int = Field(..., gt=0)
     market: Optional[str] = Field(None, description="市场类型 (CN/HK/US)，不传则自动识别")
+    price: Optional[float] = Field(None, gt=0, description="自定义成交价格（不传则使用当前市场价）")
     # 可选：关联的分析ID，便于从分析页面一键下单后追踪
     analysis_id: Optional[str] = None
 
@@ -368,8 +369,11 @@ async def place_order(payload: PlaceOrderRequest, current_user: dict = Depends(g
     # 3. 获取账户
     acc = await _get_or_create_account(current_user["id"])
 
-    # 4. 获取价格
-    price = await _get_last_price(normalized_code, market)
+    # 4. 获取价格（优先使用用户自定义价格，用于录入历史持仓）
+    if payload.price and payload.price > 0:
+        price = payload.price
+    else:
+        price = await _get_last_price(normalized_code, market)
     if price is None or price <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

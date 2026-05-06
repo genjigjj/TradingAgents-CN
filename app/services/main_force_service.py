@@ -651,7 +651,12 @@ class MainForceService:
         count: int,
     ) -> str:
         """调用资金流向分析师"""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+
         prompt = f"""你是一名资深的资金面分析师，现在需要你从整体角度分析这批主力资金净流入的股票。
+
+【报告日期】{today}
 
 【整体数据摘要】
 {summary}
@@ -697,7 +702,12 @@ class MainForceService:
         count: int,
     ) -> str:
         """调用行业板块分析师"""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+
         prompt = f"""你是一名资深的行业板块分析师，现在需要你从行业热点和板块轮动角度分析这批股票。
+
+【报告日期】{today}
 
 【整体数据摘要】
 {summary}
@@ -743,7 +753,12 @@ class MainForceService:
         count: int,
     ) -> str:
         """调用财务基本面分析师"""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+
         prompt = f"""你是一名资深的基本面分析师，现在需要你从财务质量和基本面角度分析这批股票。
+
+【报告日期】{today}
 
 【整体数据摘要】
 {summary}
@@ -796,8 +811,12 @@ class MainForceService:
         Returns:
             (综合报告文本, 推荐股票列表)
         """
+        from datetime import datetime
+
         prompt = f"""你是一名资深股票研究员，具有20年以上的投资研究经验。现在需要你综合三位分析师的意见，
 从{count}只候选股票中精选出{top_n}只最具投资价值的优质标的。
+
+【报告日期】{datetime.now().strftime("%Y年%m月%d日")}
 
 【候选股票数据】
 {data_table}
@@ -1542,7 +1561,12 @@ class MainForceService:
         Returns:
             深度分析报告文本
         """
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
+
         prompt = f"""你是一名资深的股票投资分析师，现在需要你对股票 {symbol} 进行深度分析。
+
+【报告日期】{today}
 
 【分析要求】
 请从以下维度进行全面深度分析：
