@@ -187,6 +187,31 @@ async def _get_cn_market_data(code: str) -> Dict[str, Any]:
                 "prev_close": price,
             }
 
+    # 3. 回退到 AKShare 实时获取（适用于新部署环境或数据未同步的情况）
+    try:
+        import akshare as ak
+
+        df = await asyncio.to_thread(ak.stock_zh_a_spot_em)
+        if df is not None and not df.empty:
+            # 在实时行情表中查找对应股票
+            row = df[df["代码"] == code]
+            if not row.empty:
+                row = row.iloc[0]
+                price = _safe_float(row.get("最新价"))
+                if price and price > 0:
+                    logger.info(f"✅ 从 AKShare 实时行情获取 A 股价格: {code} = {price}")
+                    return {
+                        "price": price,
+                        "change_pct": _safe_float(row.get("涨跌幅"), 0.0),
+                        "volume": _safe_float(row.get("成交量"), 0.0),
+                        "high": _safe_float(row.get("最高"), price),
+                        "low": _safe_float(row.get("最低"), price),
+                        "open": _safe_float(row.get("今开"), price),
+                        "prev_close": _safe_float(row.get("昨收"), price),
+                    }
+    except Exception as e:
+        logger.warning(f"AKShare 实时行情获取失败: {code}: {e}")
+
     raise ValueError(f"无法获取 A 股 {code} 的行情数据")
 
 
